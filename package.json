@@ -1,12 +1,16 @@
 {
   "name": "catzconnect",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "unified communication gateway",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
     "dist"
   ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Catalizo/catzconnect-typescript-sdk.git"
+  },
   "scripts": {
     "build": "tsup src/index.ts --dts",
     "clean": "rm -rf dist",

@@ -53,7 +53,7 @@ await catzconnect.send({
   template: "otp",
   payload: {
     to: "user@example.com",
-    otp: 123456,
+    otp: "123456",
   },
 });
 ```
@@ -71,7 +71,7 @@ await catzconnect.send({
   template: "otp",
   payload: {
     to: string;   // required, valid email
-    otp: number;  // required
+    otp: string;  // required
   }
 }
 ```
@@ -124,8 +124,7 @@ try {
 
 ```json
 {
-  "status": "success",
-  "request_id": "abc123"
+  "status": "success"
 }
 ```
 
