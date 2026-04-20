@@ -1,0 +1,36 @@
+import { HttpClient } from "./core/http";
+import { encrypt } from "./core/crypto";
+import { EnvValues, SendInput } from "./types";
+import { verifyPayload } from "./core/payload";
+
+class CatzConnect {
+  private http = new HttpClient();
+
+  async send(input: SendInput, env?: EnvValues) {
+    verifyPayload(input);
+
+    const finalPayload = {
+      message_type: input.type,
+      channel: input.channel,
+      template: input.template,
+      ...input.payload,
+    };
+
+    const enc = await encrypt(finalPayload, env);
+    if (!enc) {
+      throw new Error("Encryption failed");
+    }
+
+    try {
+      const res = await this.http.post("/sdk/send", enc);
+
+      return res;
+    } catch (err: any) {
+      throw new Error(
+        `Failed to send ${input.type}.${input.channel}.${input.template}: ${err.message}`,
+      );
+    }
+  }
+}
+
+export const catzconnect = new CatzConnect();

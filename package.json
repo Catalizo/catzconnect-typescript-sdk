@@ -1,0 +1,25 @@
+{
+  "name": "catzconnect",
+  "version": "1.0.0",
+  "description": "unified communication gateway",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --dts",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "author": "catalizo",
+  "license": "ISC",
+  "dependencies": {
+    "libsodium-wrappers": "^0.8.2"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.2",
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.2"
+  }
+}
