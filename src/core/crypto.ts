@@ -1,4 +1,4 @@
-import sodium from "libsodium-wrappers";
+import sodium from "libsodium-wrappers-sumo";
 import { EnvValues } from "../types";
 
 let _ready: Promise<void> | null = null;

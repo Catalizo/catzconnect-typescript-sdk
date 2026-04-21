@@ -59,12 +59,12 @@ var HttpClient = class {
 };
 
 // src/core/crypto.ts
-var import_libsodium_wrappers = __toESM(require("libsodium-wrappers"));
+var import_libsodium_wrappers_sumo = __toESM(require("libsodium-wrappers-sumo"));
 var _ready = null;
 async function init() {
-  if (!_ready) _ready = import_libsodium_wrappers.default.ready;
+  if (!_ready) _ready = import_libsodium_wrappers_sumo.default.ready;
   await _ready;
-  return import_libsodium_wrappers.default;
+  return import_libsodium_wrappers_sumo.default;
 }
 var b64ToU8 = (b64) => new Uint8Array(Buffer.from(b64, "base64"));
 var u8ToB64 = (u) => Buffer.from(u).toString("base64");
