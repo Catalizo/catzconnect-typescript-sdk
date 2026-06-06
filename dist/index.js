@@ -36,9 +36,9 @@ module.exports = __toCommonJS(index_exports);
 
 // src/core/http.ts
 var HttpClient = class {
-  async post(path, body) {
-    const baseURL = process.env.BASE_URL ?? "https://api.catzconnect.com";
-    const apiKey = process.env.API_KEY;
+  async post(path, body, env) {
+    const baseURL = process.env.CATZCONNECT_BASE_URL ?? "https://api.catzconnect.com";
+    const apiKey = env ? env.api_key : process.env.CATZCONNECT_API_KEY;
     if (!apiKey) {
       throw new Error("Missing API key in environment");
     }
@@ -69,7 +69,7 @@ async function init() {
 var b64ToU8 = (b64) => new Uint8Array(Buffer.from(b64, "base64"));
 var u8ToB64 = (u) => Buffer.from(u).toString("base64");
 async function encrypt(payload, env) {
-  if (!env && (!process.env.PRIVATE_KEY || !process.env.SERVER_PUBLIC_KEY)) {
+  if (!env && (!process.env.CATZCONNECT_PRIVATE_KEY || !process.env.CATZCONNECT_SERVER_PUBLIC_KEY)) {
     throw new Error("Missing keys, Make sure keys exists at Environment");
   }
   const s = await init();
@@ -77,8 +77,8 @@ async function encrypt(payload, env) {
     ...payload,
     ts: Date.now()
   };
-  const pk = env ? env.private_key : process.env.PRIVATE_KEY ?? "";
-  const spk = env ? env.server_public_key : process.env.SERVER_PUBLIC_KEY ?? "";
+  const pk = env ? env.private_key : process.env.CATZCONNECT_PRIVATE_KEY ?? "";
+  const spk = env ? env.server_public_key : process.env.CATZCONNECT_SERVER_PUBLIC_KEY ?? "";
   const clientPriv = b64ToU8(pk);
   const serverPub = b64ToU8(spk);
   const shared = s.crypto_scalarmult(clientPriv, serverPub);
@@ -115,8 +115,11 @@ function validateEmail(email) {
 
 // src/core/payload.ts
 function verifyPayload(input) {
-  const { type, channel, template, payload } = input;
+  const { type, channel, template, identity, payload } = input;
   if (channel === "Email" && type === "Verification" && template === "Otp") {
+    if (!identity) {
+      throw new Error("Missing 'identity'");
+    }
     if (!payload.to) {
       throw new Error("Missing 'to' in payload");
     }
@@ -138,6 +141,25 @@ function verifyPayload(input) {
     }
     return;
   }
+  if (channel === "Email" && type === "Transactional" && template === "Custom") {
+    if (!identity) {
+      throw new Error("Missing 'identity'");
+    }
+    if (!payload.to) {
+      throw new Error("Missing 'to' in payload");
+    }
+    if (payload.subject === void 0 || payload.subject === null) {
+      throw new Error("Missing 'subject' in payload");
+    }
+    if (payload.body === void 0 || payload.body === null) {
+      throw new Error("Missing 'body' in payload");
+    }
+    if (typeof payload.to !== "string") {
+      throw new Error("'to' must be a string");
+    }
+    validateEmail(payload.to);
+    return;
+  }
   throw new Error(`Unsupported combination: ${type}.${channel}.${template}`);
 }
 
@@ -152,6 +174,7 @@ var CatzConnect = class {
       message_type: input.type,
       channel: input.channel,
       template: input.template,
+      identity: input.identity,
       ...input.payload
     };
     const enc = await encrypt(finalPayload, env);
@@ -159,7 +182,7 @@ var CatzConnect = class {
       throw new Error("Encryption failed");
     }
     try {
-      const res = await this.http.post("/sdk/send", enc);
+      const res = await this.http.post("/sdk/send", enc, env);
       return res;
     } catch (err) {
       throw new Error(

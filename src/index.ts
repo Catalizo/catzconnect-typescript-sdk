@@ -13,6 +13,7 @@ class CatzConnect {
       message_type: input.type,
       channel: input.channel,
       template: input.template,
+      identity: input.identity,
       ...input.payload,
     };
 
@@ -22,7 +23,7 @@ class CatzConnect {
     }
 
     try {
-      const res = await this.http.post("/sdk/send", enc);
+      const res = await this.http.post("/sdk/send", enc, env);
 
       return res;
     } catch (err: any) {

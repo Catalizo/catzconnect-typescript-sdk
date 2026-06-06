@@ -1,15 +1,18 @@
-type MessageType = "Verification";
+type MessageType = "Verification" | "Transactional";
 type Channel = "Email";
-type Template = "Otp";
+type Template = "Otp" | "Custom";
 interface SendInput {
     channel: Channel;
     type: MessageType;
     template: Template;
+    identity: string;
     payload: SendPayload;
 }
 interface SendPayload {
     to?: string;
     otp?: string;
+    subject?: string;
+    body?: string;
 }
 interface EnvValues {
     api_key: string;

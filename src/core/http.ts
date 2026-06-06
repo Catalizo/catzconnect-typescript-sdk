@@ -1,3 +1,5 @@
+import { EnvValues } from "../types";
+
 export class HttpClient {
   async post(
     path: string,
@@ -5,10 +7,11 @@ export class HttpClient {
       nonce: string;
       ciphertext: string;
     },
+    env?: EnvValues,
   ) {
-    const baseURL = process.env.BASE_URL ?? "https://api.catzconnect.com";
+    const baseURL = process.env.CATZCONNECT_BASE_URL ?? "https://api.catzconnect.com";
 
-    const apiKey = process.env.API_KEY;
+    const apiKey = env ? env.api_key : process.env.CATZCONNECT_API_KEY;
     if (!apiKey) {
       throw new Error("Missing API key in environment");
     }

@@ -17,15 +17,8 @@ A secure, minimal SDK for sending encrypted communication requests (e.g., email 
 ## 📦 Installation
 
 ```bash
-npm install catzconnect-sdk
+npm install catzconnect
 ```
-
-Also install peer dependency:
-
-```bash
-npm install libsodium-wrappers
-```
-
 ---
 
 ## ⚙️ Environment Setup
@@ -33,9 +26,9 @@ npm install libsodium-wrappers
 Create a `.env` file:
 
 ```env
-API_KEY=your_api_key
-PRIVATE_KEY=your_base64_private_key
-SERVER_PUBLIC_KEY=server_base64_public_key
+CATZCONNECT_API_KEY=your_api_key
+CATZCONNECT_PRIVATE_KEY=your_base64_private_key
+CATZCONNECT_SERVER_PUBLIC_KEY=server_base64_public_key
 ```
 
 > ⚠️ Never expose these values in frontend/public environments.
@@ -45,12 +38,13 @@ SERVER_PUBLIC_KEY=server_base64_public_key
 ## 🚀 Usage
 
 ```ts
-import { catzconnect } from "catzconnect-sdk";
+import { catzconnect } from "catzconnect";
 
 await catzconnect.send({
-  type: "verification",
-  channel: "email",
-  template: "otp",
+  type: "Verification",
+  channel: "Email",
+  template: "Otp",
+  identity: "user@domain.com",
   payload: {
     to: "user@example.com",
     otp: "123456",
@@ -66,12 +60,29 @@ await catzconnect.send({
 
 ```ts
 {
-  type: "verification",
-  channel: "email",
-  template: "otp",
+  type: "Verification",
+  channel: "Email",
+  template: "Otp",
+  identity: "user@domain.com",
   payload: {
     to: string;   // required, valid email
     otp: string;  // required
+  }
+}
+```
+
+### Email Transactional
+
+```ts
+{
+  type: "Transactional",
+  channel: "Email",
+  template: "Custom",
+  identity: "user@domain.com",
+  payload: {
+    to: string;   // required, valid email
+    subject: string;  // required
+    body: string;  // required
   }
 }
 ```

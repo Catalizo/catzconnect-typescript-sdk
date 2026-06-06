@@ -15,7 +15,7 @@ export async function encrypt(
   payload: Record<string, string>,
   env?: EnvValues,
 ): Promise<{ nonce: string; ciphertext: string } | undefined> {
-  if (!env && (!process.env.PRIVATE_KEY || !process.env.SERVER_PUBLIC_KEY)) {
+  if (!env && (!process.env.CATZCONNECT_PRIVATE_KEY || !process.env.CATZCONNECT_SERVER_PUBLIC_KEY)) {
     throw new Error("Missing keys, Make sure keys exists at Environment");
   }
 
@@ -26,10 +26,10 @@ export async function encrypt(
     ts: Date.now(),
   };
 
-  const pk = env ? env.private_key : (process.env.PRIVATE_KEY ?? "");
+  const pk = env ? env.private_key : (process.env.CATZCONNECT_PRIVATE_KEY ?? "");
   const spk = env
     ? env.server_public_key
-    : (process.env.SERVER_PUBLIC_KEY ?? "");
+    : (process.env.CATZCONNECT_SERVER_PUBLIC_KEY ?? "");
 
   const clientPriv = b64ToU8(pk); // 32 bytes
   const serverPub = b64ToU8(spk); // 32 bytes
