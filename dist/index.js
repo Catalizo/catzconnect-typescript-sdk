@@ -30,7 +30,10 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/index.ts
 var index_exports = {};
 __export(index_exports, {
-  catzconnect: () => catzconnect
+  catzconnect: () => catzconnect,
+  generateDeviceKeys: () => generateDeviceKeys,
+  isSealedPush: () => isSealedPush,
+  openPushPayload: () => openPushPayload
 });
 module.exports = __toCommonJS(index_exports);
 
@@ -112,6 +115,18 @@ function validateEmail(email) {
     throw new Error(`Invalid email: ${email}`);
   }
 }
+function validatePhone(phone) {
+  if (phone.includes("@")) {
+    throw new Error(`WhatsApp messages go to phone numbers, not email addresses: ${phone}`);
+  }
+  if (!/^[\d\s()+\-]+$/.test(phone)) {
+    throw new Error(`Invalid phone number: ${phone}`);
+  }
+  const digits = phone.replace(/\D/g, "");
+  if (digits.length < 7 || digits.length > 15) {
+    throw new Error(`Invalid phone number: ${phone}`);
+  }
+}
 
 // src/core/payload.ts
 function verifyPayload(input) {
@@ -160,7 +175,118 @@ function verifyPayload(input) {
     validateEmail(payload.to);
     return;
   }
+  if (channel === "WhatsApp" && type === "Verification" && template === "Otp") {
+    if (!identity) {
+      throw new Error("Missing 'identity'");
+    }
+    if (!payload.to) {
+      throw new Error("Missing 'to' in payload");
+    }
+    if (typeof payload.to !== "string") {
+      throw new Error("'to' must be a string");
+    }
+    validatePhone(payload.to);
+    if (payload.otp === void 0 || payload.otp === null) {
+      throw new Error("Missing 'otp' in payload");
+    }
+    if (typeof payload.otp !== "string") {
+      throw new Error("'otp' must be a string");
+    }
+    if (!/^[A-Za-z0-9]{1,15}$/.test(payload.otp)) {
+      throw new Error("'otp' must be up to 15 letters or digits");
+    }
+    return;
+  }
+  if (channel === "WhatsApp" && type === "Transactional" && template === "Custom") {
+    if (!identity) {
+      throw new Error("Missing 'identity'");
+    }
+    if (!payload.to) {
+      throw new Error("Missing 'to' in payload");
+    }
+    if (typeof payload.to !== "string") {
+      throw new Error("'to' must be a string");
+    }
+    validatePhone(payload.to);
+    if (payload.body === void 0 || payload.body === null || payload.body === "") {
+      throw new Error("Missing 'body' in payload");
+    }
+    const length = (payload.subject ? payload.subject.length + 6 : 0) + payload.body.length;
+    if (length > 4096) {
+      throw new Error("WhatsApp messages are limited to 4096 characters");
+    }
+    return;
+  }
+  if (channel === "Push" && type === "Notification" && template === "Notification") {
+    if (!identity) {
+      throw new Error("Missing 'identity' \u2014 the Firebase project ID");
+    }
+    if (!payload.to || typeof payload.to !== "string") {
+      throw new Error("Missing 'to' in payload \u2014 the device's FCM registration token");
+    }
+    if (payload.to.includes("@")) {
+      throw new Error("'to' must be an FCM registration token, not an email address");
+    }
+    if (!payload.body || typeof payload.body !== "string") {
+      throw new Error("Missing 'body' in payload");
+    }
+    for (const field of ["image", "link"]) {
+      const value = payload[field];
+      if (value !== void 0 && (typeof value !== "string" || !value.startsWith("https://"))) {
+        throw new Error(`'${field}' must be an https:// URL`);
+      }
+    }
+    if (payload.data !== void 0) {
+      for (const [k, v] of Object.entries(payload.data)) {
+        if (typeof v !== "string") {
+          throw new Error(`'data.${k}' must be a string \u2014 FCM only carries string values`);
+        }
+      }
+    }
+    if (payload.device_key !== void 0 && typeof payload.device_key !== "string") {
+      throw new Error("'device_key' must be the base64 public key from generateDeviceKeys()");
+    }
+    return;
+  }
   throw new Error(`Unsupported combination: ${type}.${channel}.${template}`);
+}
+
+// src/push.ts
+var import_libsodium_wrappers_sumo2 = __toESM(require("libsodium-wrappers-sumo"));
+var ready = null;
+async function lib() {
+  if (!ready) ready = import_libsodium_wrappers_sumo2.default.ready;
+  await ready;
+  return import_libsodium_wrappers_sumo2.default;
+}
+var toB64 = (u) => import_libsodium_wrappers_sumo2.default.to_base64(u, import_libsodium_wrappers_sumo2.default.base64_variants.ORIGINAL);
+var fromB64 = (s) => import_libsodium_wrappers_sumo2.default.from_base64(s, import_libsodium_wrappers_sumo2.default.base64_variants.ORIGINAL);
+async function generateDeviceKeys() {
+  const s = await lib();
+  const kp = s.crypto_box_keypair();
+  return { publicKey: toB64(kp.publicKey), privateKey: toB64(kp.privateKey) };
+}
+function isSealedPush(data) {
+  return !!data && data.catz_v === "1" && typeof data.catz_sealed === "string";
+}
+async function openPushPayload(data, keys) {
+  if (!isSealedPush(data)) {
+    throw new Error("Not a sealed CatzConnect notification");
+  }
+  const s = await lib();
+  const opened = s.crypto_box_seal_open(
+    fromB64(data.catz_sealed),
+    fromB64(keys.publicKey),
+    fromB64(keys.privateKey)
+  );
+  const parsed = JSON.parse(s.to_string(opened));
+  return {
+    title: parsed.title ?? void 0,
+    body: parsed.body,
+    data: parsed.data ?? {},
+    image: parsed.image ?? void 0,
+    link: parsed.link ?? void 0
+  };
 }
 
 // src/index.ts
@@ -194,5 +320,8 @@ var CatzConnect = class {
 var catzconnect = new CatzConnect();
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
-  catzconnect
+  catzconnect,
+  generateDeviceKeys,
+  isSealedPush,
+  openPushPayload
 });

@@ -12,7 +12,7 @@ const b64ToU8 = (b64: string) => new Uint8Array(Buffer.from(b64, "base64"));
 const u8ToB64 = (u: Uint8Array) => Buffer.from(u).toString("base64");
 
 export async function encrypt(
-  payload: Record<string, string>,
+  payload: Record<string, unknown>,
   env?: EnvValues,
 ): Promise<{ nonce: string; ciphertext: string } | undefined> {
   if (!env && (!process.env.CATZCONNECT_PRIVATE_KEY || !process.env.CATZCONNECT_SERVER_PUBLIC_KEY)) {

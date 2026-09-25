@@ -149,3 +149,47 @@ npm run dev
 ```
 
 ---
+
+## WhatsApp
+
+`to` is a phone number with country code; `identity` is your connected WhatsApp number.
+
+```ts
+await catzconnect.send({
+  type: "Verification", channel: "WhatsApp", template: "Otp",
+  identity: "919578456444",
+  payload: { to: "+91 98765 43210", otp: "123456" },
+});
+
+await catzconnect.send({
+  type: "Transactional", channel: "WhatsApp", template: "Custom",
+  identity: "919578456444",
+  payload: { to: "+91 98765 43210", subject: "Order shipped", body: "Arriving Friday." },
+});
+```
+
+OTPs need an approved Authentication template on the number. Custom messages only
+reach people who messaged your number in the last 24 hours. See `WHATSAPP.md`.
+
+## Push notifications (end-to-end encrypted)
+
+```ts
+import { catzconnect } from "catzconnect";                       // server
+import { generateDeviceKeys, openPushPayload, isSealedPush } from "catzconnect/push"; // app or browser
+
+// Server: send
+await catzconnect.send({
+  type: "Notification", channel: "Push", template: "Notification",
+  identity: "your-firebase-project-id",
+  payload: { to: fcmToken, device_key: devicePublicKey, title: "Hi", body: "Hello" },
+});
+
+// Device: generate keys once, then open incoming messages
+const keys = await generateDeviceKeys();
+if (isSealedPush(message.data)) {
+  const n = await openPushPayload(message.data, keys);
+}
+```
+
+Import device helpers from `catzconnect/push` in a browser or service worker —
+it has no Node APIs and no API-key handling. See `PUSH.md` for web, Android and iOS.

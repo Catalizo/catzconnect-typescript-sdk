@@ -35,3 +35,8 @@ class CatzConnect {
 }
 
 export const catzconnect = new CatzConnect();
+
+// Device-side helpers for end-to-end encrypted push. Used in the app that
+// receives notifications, not on your server.
+export { generateDeviceKeys, openPushPayload, isSealedPush } from "./push";
+export type { DeviceKeys, PushContent } from "./push";
