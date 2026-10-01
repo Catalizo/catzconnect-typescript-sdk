@@ -36,6 +36,12 @@ class CatzConnect {
 
 export const catzconnect = new CatzConnect();
 
+// Check the Catz-Signature header on webhook deliveries.
+export { verifyWebhookSignature } from "./core/webhook";
+
+// Server-side: the user_hash that lets an app link a push device to a user.
+export { computeUserHash } from "./core/webhook";
+
 // Device-side helpers for end-to-end encrypted push. Used in the app that
 // receives notifications, not on your server.
 export { generateDeviceKeys, openPushPayload, isSealedPush } from "./push";

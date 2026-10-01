@@ -1,43 +1,8 @@
-"use strict";
-var __create = Object.create;
-var __defProp = Object.defineProperty;
-var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
-var __getOwnPropNames = Object.getOwnPropertyNames;
-var __getProtoOf = Object.getPrototypeOf;
-var __hasOwnProp = Object.prototype.hasOwnProperty;
-var __export = (target, all) => {
-  for (var name in all)
-    __defProp(target, name, { get: all[name], enumerable: true });
-};
-var __copyProps = (to, from, except, desc) => {
-  if (from && typeof from === "object" || typeof from === "function") {
-    for (let key of __getOwnPropNames(from))
-      if (!__hasOwnProp.call(to, key) && key !== except)
-        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
-  }
-  return to;
-};
-var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
-  // If the importer is in node compatibility mode or this is not an ESM
-  // file that has been converted to a CommonJS file using a Babel-
-  // compatible transform (i.e. "__esModule" has not been set), then set
-  // "default" to the CommonJS "module.exports" for node compatibility.
-  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
-  mod
-));
-var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
-
-// src/index.ts
-var index_exports = {};
-__export(index_exports, {
-  catzconnect: () => catzconnect,
-  computeUserHash: () => computeUserHash,
-  generateDeviceKeys: () => generateDeviceKeys,
-  isSealedPush: () => isSealedPush,
-  openPushPayload: () => openPushPayload,
-  verifyWebhookSignature: () => verifyWebhookSignature
-});
-module.exports = __toCommonJS(index_exports);
+import {
+  generateDeviceKeys,
+  isSealedPush,
+  openPushPayload
+} from "./chunk-NRHGKW5X.mjs";
 
 // src/core/http.ts
 var HttpClient = class {
@@ -64,12 +29,12 @@ var HttpClient = class {
 };
 
 // src/core/crypto.ts
-var import_libsodium_wrappers_sumo = __toESM(require("libsodium-wrappers-sumo"));
+import sodium from "libsodium-wrappers-sumo";
 var _ready = null;
 async function init() {
-  if (!_ready) _ready = import_libsodium_wrappers_sumo.default.ready;
+  if (!_ready) _ready = sodium.ready;
   await _ready;
-  return import_libsodium_wrappers_sumo.default;
+  return sodium;
 }
 var b64ToU8 = (b64) => new Uint8Array(Buffer.from(b64, "base64"));
 var u8ToB64 = (u) => Buffer.from(u).toString("base64");
@@ -291,7 +256,7 @@ function verifyPayload(input) {
 }
 
 // src/core/webhook.ts
-var import_node_crypto = require("crypto");
+import { createHmac, timingSafeEqual } from "crypto";
 function verifyWebhookSignature(rawBody, header, secret, toleranceSeconds = 300, nowSeconds = Math.floor(Date.now() / 1e3)) {
   if (!header || !secret) return false;
   let t;
@@ -307,53 +272,15 @@ function verifyWebhookSignature(rawBody, header, secret, toleranceSeconds = 300,
   if (!t || !/^\d+$/.test(t) || v1.length === 0) return false;
   if (toleranceSeconds > 0 && Math.abs(nowSeconds - Number(t)) > toleranceSeconds) return false;
   const body = typeof rawBody === "string" ? Buffer.from(rawBody, "utf8") : Buffer.from(rawBody);
-  const expected = (0, import_node_crypto.createHmac)("sha256", secret).update(`${t}.`).update(body).digest();
+  const expected = createHmac("sha256", secret).update(`${t}.`).update(body).digest();
   return v1.some((sig) => {
     if (!/^[0-9a-fA-F]{64}$/.test(sig)) return false;
-    return (0, import_node_crypto.timingSafeEqual)(expected, Buffer.from(sig, "hex"));
+    return timingSafeEqual(expected, Buffer.from(sig, "hex"));
   });
 }
 function computeUserHash(externalUserId, identitySecret) {
   if (!identitySecret) throw new Error("computeUserHash: identity secret is required");
-  return (0, import_node_crypto.createHmac)("sha256", identitySecret).update(externalUserId, "utf8").digest("hex");
-}
-
-// src/push.ts
-var import_libsodium_wrappers_sumo2 = __toESM(require("libsodium-wrappers-sumo"));
-var ready = null;
-async function lib() {
-  if (!ready) ready = import_libsodium_wrappers_sumo2.default.ready;
-  await ready;
-  return import_libsodium_wrappers_sumo2.default;
-}
-var toB64 = (u) => import_libsodium_wrappers_sumo2.default.to_base64(u, import_libsodium_wrappers_sumo2.default.base64_variants.ORIGINAL);
-var fromB64 = (s) => import_libsodium_wrappers_sumo2.default.from_base64(s, import_libsodium_wrappers_sumo2.default.base64_variants.ORIGINAL);
-async function generateDeviceKeys() {
-  const s = await lib();
-  const kp = s.crypto_box_keypair();
-  return { publicKey: toB64(kp.publicKey), privateKey: toB64(kp.privateKey) };
-}
-function isSealedPush(data) {
-  return !!data && data.catz_v === "1" && typeof data.catz_sealed === "string";
-}
-async function openPushPayload(data, keys) {
-  if (!isSealedPush(data)) {
-    throw new Error("Not a sealed CatzConnect notification");
-  }
-  const s = await lib();
-  const opened = s.crypto_box_seal_open(
-    fromB64(data.catz_sealed),
-    fromB64(keys.publicKey),
-    fromB64(keys.privateKey)
-  );
-  const parsed = JSON.parse(s.to_string(opened));
-  return {
-    title: parsed.title ?? void 0,
-    body: parsed.body,
-    data: parsed.data ?? {},
-    image: parsed.image ?? void 0,
-    link: parsed.link ?? void 0
-  };
+  return createHmac("sha256", identitySecret).update(externalUserId, "utf8").digest("hex");
 }
 
 // src/index.ts
@@ -385,12 +312,11 @@ var CatzConnect = class {
   }
 };
 var catzconnect = new CatzConnect();
-// Annotate the CommonJS export names for ESM import in node:
-0 && (module.exports = {
+export {
   catzconnect,
   computeUserHash,
   generateDeviceKeys,
   isSealedPush,
   openPushPayload,
   verifyWebhookSignature
-});
+};

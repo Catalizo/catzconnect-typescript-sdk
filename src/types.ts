@@ -2,7 +2,11 @@ export type MessageType = "Verification" | "Transactional" | "Notification";
 
 export type Channel = "Email" | "WhatsApp" | "Push";
 
-export type Template = "Otp" | "Custom" | "Notification";
+/**
+ * The built-in templates, or the name of an email template created in the
+ * panel (Email → Templates). A panel template is filled from `payload.data`.
+ */
+export type Template = "Otp" | "Custom" | "Notification" | (string & {});
 
 export interface SendInput {
   channel: Channel;
@@ -22,7 +26,10 @@ export interface SendPayload {
 
   /** Push: notification title. */
   title?: string;
-  /** Push: key/value pairs delivered to the app. Values must be strings. */
+  /**
+   * Push: key/value pairs delivered to the app. Email with a panel template:
+   * the values for its {{variables}}. Values must be strings.
+   */
   data?: Record<string, string>;
   /** Push: https URL of an image to show. */
   image?: string;
@@ -34,6 +41,13 @@ export interface SendPayload {
    * Apple and CatzConnect see ciphertext.
    */
   device_key?: string;
+  /**
+   * Push: send to every device your app registered for this user (with
+   * `POST /push/register`) instead of one token in `to`. Give one of `to`
+   * or `external_user_id`. Each device's registered key is used for
+   * end-to-end encryption, so `device_key` is not allowed with it.
+   */
+  external_user_id?: string;
 }
 
 export interface EnvValues {

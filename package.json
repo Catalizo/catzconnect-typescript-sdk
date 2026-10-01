@@ -1,6 +1,6 @@
 {
   "name": "catzconnect",
-  "version": "1.0.5",
+  "version": "1.2.1",
   "description": "unified communication gateway",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -12,18 +12,31 @@
     "url": "https://github.com/Catalizo/catzconnect-typescript-sdk.git"
   },
   "scripts": {
-    "build": "tsup src/index.ts --dts",
+    "build": "tsup src/index.ts src/push.ts --format cjs,esm --dts",
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run clean && npm run build"
   },
   "author": "catalizo",
   "license": "ISC",
   "devDependencies": {
-    "@types/node": "^25.5.2",
+    "@types/node": "^25.9.8",
     "tsup": "^8.5.1",
     "typescript": "^6.0.2"
   },
   "dependencies": {
     "libsodium-wrappers-sumo": "^0.8.4"
+  },
+  "module": "dist/index.mjs",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./push": {
+      "types": "./dist/push.d.ts",
+      "import": "./dist/push.mjs",
+      "require": "./dist/push.js"
+    }
   }
 }

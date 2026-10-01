@@ -193,3 +193,47 @@ if (isSealedPush(message.data)) {
 
 Import device helpers from `catzconnect/push` in a browser or service worker —
 it has no Node APIs and no API-key handling. See `PUSH.md` for web, Android and iOS.
+
+## Email templates from the panel
+
+```ts
+await catzconnect.send({
+  type: "Transactional",
+  channel: "Email",
+  template: "Order shipped",          // the template's name in the panel
+  identity: "noreply@yourdomain.com",
+  payload: { to: "user@example.com", data: { name: "Ann", order_id: "A-1042" } },
+});
+```
+
+## Push to a user's registered devices
+
+When your app registers its devices with `POST /push/register` (using the
+project's publishable key), send to the user instead of a token:
+
+```ts
+await catzconnect.send({
+  type: "Notification",
+  channel: "Push",
+  template: "Notification",
+  identity: "my-firebase-project",
+  payload: { external_user_id: "user-42", title: "Order shipped", body: "It's on the way" },
+});
+```
+
+Give either `to` or `external_user_id`. Each device's registered key is used
+for encryption, so `device_key` is not allowed with `external_user_id`.
+
+## Verifying webhooks
+
+```ts
+import { verifyWebhookSignature } from "catzconnect";
+
+// Express: app.post("/webhooks/catz", express.raw({ type: "application/json" }), handler)
+const ok = verifyWebhookSignature(req.body, req.get("catz-signature"), process.env.CATZCONNECT_WEBHOOK_SECRET!);
+if (!ok) return res.sendStatus(400);
+const event = JSON.parse(req.body.toString("utf8"));
+```
+
+Pass the raw body, before JSON parsing. Timestamps more than 5 minutes old are
+rejected (change with the fourth argument, in seconds).

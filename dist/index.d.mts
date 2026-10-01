@@ -1,4 +1,4 @@
-export { DeviceKeys, PushContent, generateDeviceKeys, isSealedPush, openPushPayload } from './push.js';
+export { DeviceKeys, PushContent, generateDeviceKeys, isSealedPush, openPushPayload } from './push.mjs';
 
 type MessageType = "Verification" | "Transactional" | "Notification";
 type Channel = "Email" | "WhatsApp" | "Push";
