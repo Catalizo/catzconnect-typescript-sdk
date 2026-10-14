@@ -30,10 +30,16 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/index.ts
 var index_exports = {};
 __export(index_exports, {
+  SMS_MAX_SEGMENTS: () => SMS_MAX_SEGMENTS,
+  analyseSms: () => analyseSms,
+  buildSendPayload: () => buildSendPayload,
   catzconnect: () => catzconnect,
   computeUserHash: () => computeUserHash,
   generateDeviceKeys: () => generateDeviceKeys,
   isSealedPush: () => isSealedPush,
+  isValidDltId: () => isValidDltId,
+  isValidSmsSender: () => isValidSmsSender,
+  normaliseE164: () => normaliseE164,
   openPushPayload: () => openPushPayload,
   verifyWebhookSignature: () => verifyWebhookSignature
 });
@@ -128,6 +134,79 @@ function validatePhone(phone) {
   if (digits.length < 7 || digits.length > 15) {
     throw new Error(`Invalid phone number: ${phone}`);
   }
+}
+
+// src/utils/sms.ts
+var SMS_MAX_SEGMENTS = 10;
+function normaliseE164(raw) {
+  const cleaned = raw.trim().replace(/[ \-.()]/g, "");
+  return /^\+[1-9]\d{7,14}$/.test(cleaned) ? cleaned : null;
+}
+function validateE164(phone) {
+  const n = normaliseE164(phone);
+  if (n === null) {
+    throw new Error(
+      `'${phone.trim()}' is not an E.164 phone number \u2014 use + and the country code, e.g. +919876543210`
+    );
+  }
+  return n;
+}
+function isValidSmsSender(s) {
+  if (s.startsWith("+")) {
+    return normaliseE164(s) === s;
+  }
+  return /^[A-Za-z0-9 ]{2,11}$/.test(s) && /[A-Za-z]/.test(s) && !s.startsWith(" ") && !s.endsWith(" ");
+}
+function isValidDltId(s) {
+  return /^\d{6,30}$/.test(s);
+}
+var GSM_BASIC = `@\xA3$\xA5\xE8\xE9\xF9\xEC\xF2\xC7
+\xD8\xF8\r\xC5\xE5\u0394_\u03A6\u0393\u039B\u03A9\u03A0\u03A8\u03A3\u0398\u039E\xC6\xE6\xDF\xC9 !"#\xA4%&'()*+,-./0123456789:;<=>?\xA1ABCDEFGHIJKLMNOPQRSTUVWXYZ\xC4\xD6\xD1\xDC\xA7\xBFabcdefghijklmnopqrstuvwxyz\xE4\xF6\xF1\xFC\xE0`;
+var GSM_EXTENSION = "^{}\\[~]|\u20AC\f";
+function gsmCost(c) {
+  if (GSM_BASIC.includes(c)) return 1;
+  if (GSM_EXTENSION.includes(c)) return 2;
+  return null;
+}
+function countSegments(costs, total, single, multi) {
+  if (total <= single) return 1;
+  let parts = 1;
+  let used = 0;
+  for (const c of costs) {
+    if (used + c > multi) {
+      parts += 1;
+      used = 0;
+    }
+    used += c;
+  }
+  return parts;
+}
+function analyseSms(text) {
+  const chars = Array.from(text);
+  const gsm = chars.map(gsmCost);
+  if (gsm.every((c) => c !== null)) {
+    const costs2 = gsm;
+    const units2 = costs2.reduce((a, b) => a + b, 0);
+    return { encoding: "gsm7", units: units2, segments: countSegments(costs2, units2, 160, 153), chars: chars.length };
+  }
+  const costs = chars.map((c) => c.length);
+  const units = costs.reduce((a, b) => a + b, 0);
+  return { encoding: "ucs2", units, segments: countSegments(costs, units, 70, 67), chars: chars.length };
+}
+function validateSmsBody(body) {
+  if (body.trim() === "") {
+    throw new Error("The message is empty");
+  }
+  if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/.test(body)) {
+    throw new Error("The message contains control characters");
+  }
+  const a = analyseSms(body);
+  if (a.segments > SMS_MAX_SEGMENTS) {
+    throw new Error(
+      `The message is ${a.segments} segments long; the limit is ${SMS_MAX_SEGMENTS} (${a.encoding === "gsm7" ? 1530 : 670} characters in ${a.encoding.toUpperCase()})`
+    );
+  }
+  return a;
 }
 
 // src/core/payload.ts
@@ -270,6 +349,10 @@ function verifyPayload(input) {
     }
     return;
   }
+  if (channel === "SMS") {
+    verifySms(input);
+    return;
+  }
   if (channel === "Email" && !["Otp", "Custom", "Notification"].includes(template)) {
     if (!identity) {
       throw new Error("Missing 'identity'");
@@ -288,6 +371,78 @@ function verifyPayload(input) {
     return;
   }
   throw new Error(`Unsupported combination: ${type}.${channel}.${template}`);
+}
+var SMS_TYPES = ["Verification", "Transactional", "Promotional"];
+function verifySms(input) {
+  const { type, template, payload } = input;
+  if (typeof payload.to !== "string" || payload.to.trim() === "") {
+    throw new Error("Missing 'to' in payload \u2014 the recipient's number in E.164, e.g. +919876543210");
+  }
+  const to = validateE164(payload.to);
+  if (!SMS_TYPES.includes(type)) {
+    throw new Error(`SMS supports type Verification (template Otp), Transactional or Promotional \u2014 not ${type}`);
+  }
+  const gateway = optionalString(payload.gateway, "gateway");
+  const sender = optionalString(payload.sender, "sender");
+  if (sender !== void 0) {
+    if (gateway === void 0) {
+      throw new Error("'sender' can only be used together with 'gateway'");
+    }
+    if (!isValidSmsSender(sender)) {
+      throw new Error("'sender' must be an E.164 number or a 2\u201311 character sender ID");
+    }
+  }
+  const dlt = optionalString(payload.dlt_template_id, "dlt_template_id");
+  if (dlt !== void 0 && !isValidDltId(dlt)) {
+    throw new Error("'dlt_template_id' must be the numeric DLT template ID");
+  }
+  if (payload.data !== void 0) {
+    if (payload.data === null || typeof payload.data !== "object") {
+      throw new Error("'data' must be an object of strings");
+    }
+    for (const [k, v] of Object.entries(payload.data)) {
+      if (typeof v !== "string") {
+        throw new Error(`'data.${k}' must be a string`);
+      }
+    }
+  }
+  const name = typeof template === "string" ? template.trim() : "";
+  if (name === "") {
+    throw new Error("Missing 'template' \u2014 Otp, Custom, or the name of an SMS template");
+  }
+  if (name.toLowerCase() === "otp") {
+    if (type !== "Verification") {
+      throw new Error("template Otp goes with type Verification");
+    }
+    if (typeof payload.otp !== "string" || payload.otp.trim() === "") {
+      throw new Error("Missing 'otp' in payload");
+    }
+    if (!/^[A-Za-z0-9]{1,15}$/.test(payload.otp.trim())) {
+      throw new Error("'otp' must be up to 15 letters or digits");
+    }
+    return;
+  }
+  if (name.toLowerCase() === "custom") {
+    if (type === "Verification") {
+      throw new Error("type Verification goes with template Otp; use Transactional for Custom");
+    }
+    if (typeof payload.body !== "string" || payload.body.trim() === "") {
+      throw new Error("Missing 'body' in payload");
+    }
+    validateSmsBody(payload.body.trim());
+    if (to.startsWith("+91") && dlt === void 0) {
+      throw new Error("India (+91) requires a DLT template ID: pass 'dlt_template_id' for Custom messages");
+    }
+    return;
+  }
+}
+function optionalString(v, field) {
+  if (v === void 0 || v === null) return void 0;
+  if (typeof v !== "string") {
+    throw new Error(`'${field}' must be a string`);
+  }
+  const t = v.trim();
+  return t === "" ? void 0 : t;
 }
 
 // src/core/webhook.ts
@@ -357,19 +512,39 @@ async function openPushPayload(data, keys) {
 }
 
 // src/index.ts
+function buildSendPayload(input) {
+  if (input.channel === "SMS") {
+    const p = input.payload;
+    const out = {
+      message_type: input.type,
+      channel: "SMS",
+      template: input.template,
+      identity: input.identity ?? "",
+      // required by the server, ignored for SMS
+      to: p.to
+    };
+    for (const k of ["otp", "body", "gateway", "sender", "dlt_template_id"]) {
+      const v = p[k];
+      if (typeof v === "string" && v.trim() !== "") out[k] = v;
+    }
+    if (p.data !== void 0 && Object.keys(p.data).length > 0) out.data = p.data;
+    return out;
+  }
+  return {
+    message_type: input.type,
+    channel: input.channel,
+    template: input.template,
+    identity: input.identity,
+    ...input.payload
+  };
+}
 var CatzConnect = class {
   constructor() {
     this.http = new HttpClient();
   }
   async send(input, env) {
     verifyPayload(input);
-    const finalPayload = {
-      message_type: input.type,
-      channel: input.channel,
-      template: input.template,
-      identity: input.identity,
-      ...input.payload
-    };
+    const finalPayload = buildSendPayload(input);
     const enc = await encrypt(finalPayload, env);
     if (!enc) {
       throw new Error("Encryption failed");
@@ -387,10 +562,16 @@ var CatzConnect = class {
 var catzconnect = new CatzConnect();
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  SMS_MAX_SEGMENTS,
+  analyseSms,
+  buildSendPayload,
   catzconnect,
   computeUserHash,
   generateDeviceKeys,
   isSealedPush,
+  isValidDltId,
+  isValidSmsSender,
+  normaliseE164,
   openPushPayload,
   verifyWebhookSignature
 });

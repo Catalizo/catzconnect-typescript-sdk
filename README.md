@@ -237,3 +237,49 @@ const event = JSON.parse(req.body.toString("utf8"));
 
 Pass the raw body, before JSON parsing. Timestamps more than 5 minutes old are
 rejected (change with the fourth argument, in seconds).
+
+## SMS
+
+`to` is an E.164 number (`+` and the country code; spaces, dashes, dots and
+brackets are removed). `identity` is ignored for SMS — pass `""`. The SMS
+result is typed: `data` is `{ message_id, segments, encoding }`.
+
+```ts
+// One-time code: type Verification, template Otp (up to 15 letters or digits).
+const res = await catzconnect.send({
+  channel: "SMS", type: "Verification", template: "Otp", identity: "",
+  payload: { to: "+14155550100", otp: "123456" },
+});
+console.log(res.data.message_id, res.data.segments, res.data.encoding); // "…", 1, "gsm7"
+
+// Free text: type Transactional or Promotional, template Custom.
+await catzconnect.send({
+  channel: "SMS", type: "Transactional", template: "Custom", identity: "",
+  payload: { to: "+44 7700 900123", body: "Your order A-1042 has shipped." },
+});
+
+// An SMS template from the panel, filled from data.
+await catzconnect.send({
+  channel: "SMS", type: "Transactional", template: "Order shipped", identity: "",
+  payload: { to: "+14155550100", data: { name: "Ann", order_id: "A-1042" } },
+});
+
+// India: a DLT template id is required (unless the panel template has one).
+// gateway pins one of the API key's gateways (id or label); sender overrides
+// the sender ID when that gateway allows it.
+await catzconnect.send({
+  channel: "SMS", type: "Promotional", template: "Custom", identity: "",
+  payload: {
+    to: "+919876543210", body: "Sale ends tonight",
+    dlt_template_id: "1207161234567890123", gateway: "MSG91 India", sender: "CATZIN",
+  },
+});
+```
+
+Checked before sending, as the server does: E.164 `to`; `Otp` only with
+`Verification`, `Custom` only with `Transactional`/`Promotional`; `sender`
+only with `gateway` (E.164 or 2–11 letters/digits); `dlt_template_id` digits;
+Custom bodies at most 10 segments (1,530 GSM-7 or 670 UCS-2 characters), no
+control characters, and a DLT id for +91. `analyseSms(text)` returns the
+encoding and segment count the server will use; each SMS counts as one
+message toward your plan's limit regardless of segments.

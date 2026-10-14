@@ -1,5 +1,6 @@
 import { SendInput } from "../types";
 import { validateEmail, validatePhone } from "../utils/validators";
+import { isValidDltId, isValidSmsSender, validateE164, validateSmsBody } from "../utils/sms";
 
 export function verifyPayload(input: SendInput) {
   const { type, channel, template, identity, payload } = input;
@@ -194,6 +195,11 @@ export function verifyPayload(input: SendInput) {
     return;
   }
 
+  if (channel === "SMS") {
+    verifySms(input);
+    return;
+  }
+
   // An email template created in the panel, sent by name. Anything that is
   // not a built-in name; the server fills its {{variables}} from data.
   if (channel === "Email" && !["Otp", "Custom", "Notification"].includes(template)) {
@@ -219,4 +225,96 @@ export function verifyPayload(input: SendInput) {
   }
 
   throw new Error(`Unsupported combination: ${type}.${channel}.${template}`);
+}
+
+const SMS_TYPES = ["Verification", "Transactional", "Promotional"];
+
+/**
+ * SMS, as the server checks it: `Otp` with `Verification` and `otp`;
+ * `Custom` with `Transactional`/`Promotional` and `body`; any other name is
+ * an SMS template from the panel filled from `data`. Template names are
+ * matched case-insensitively, as on the server. `identity` is ignored.
+ */
+function verifySms(input: SendInput) {
+  const { type, template, payload } = input;
+
+  if (typeof payload.to !== "string" || payload.to.trim() === "") {
+    throw new Error("Missing 'to' in payload — the recipient's number in E.164, e.g. +919876543210");
+  }
+  const to = validateE164(payload.to);
+
+  if (!SMS_TYPES.includes(type)) {
+    throw new Error(`SMS supports type Verification (template Otp), Transactional or Promotional — not ${type}`);
+  }
+
+  const gateway = optionalString(payload.gateway, "gateway");
+  const sender = optionalString(payload.sender, "sender");
+  if (sender !== undefined) {
+    if (gateway === undefined) {
+      throw new Error("'sender' can only be used together with 'gateway'");
+    }
+    if (!isValidSmsSender(sender)) {
+      throw new Error("'sender' must be an E.164 number or a 2–11 character sender ID");
+    }
+  }
+
+  const dlt = optionalString(payload.dlt_template_id, "dlt_template_id");
+  if (dlt !== undefined && !isValidDltId(dlt)) {
+    throw new Error("'dlt_template_id' must be the numeric DLT template ID");
+  }
+
+  if (payload.data !== undefined) {
+    if (payload.data === null || typeof payload.data !== "object") {
+      throw new Error("'data' must be an object of strings");
+    }
+    for (const [k, v] of Object.entries(payload.data)) {
+      if (typeof v !== "string") {
+        throw new Error(`'data.${k}' must be a string`);
+      }
+    }
+  }
+
+  const name = typeof template === "string" ? template.trim() : "";
+  if (name === "") {
+    throw new Error("Missing 'template' — Otp, Custom, or the name of an SMS template");
+  }
+
+  if (name.toLowerCase() === "otp") {
+    if (type !== "Verification") {
+      throw new Error("template Otp goes with type Verification");
+    }
+    if (typeof payload.otp !== "string" || payload.otp.trim() === "") {
+      throw new Error("Missing 'otp' in payload");
+    }
+    if (!/^[A-Za-z0-9]{1,15}$/.test(payload.otp.trim())) {
+      throw new Error("'otp' must be up to 15 letters or digits");
+    }
+    return;
+  }
+
+  if (name.toLowerCase() === "custom") {
+    if (type === "Verification") {
+      throw new Error("type Verification goes with template Otp; use Transactional for Custom");
+    }
+    if (typeof payload.body !== "string" || payload.body.trim() === "") {
+      throw new Error("Missing 'body' in payload");
+    }
+    validateSmsBody(payload.body.trim());
+    // India needs a DLT template id; a Custom body can only get it from the payload.
+    if (to.startsWith("+91") && dlt === undefined) {
+      throw new Error("India (+91) requires a DLT template ID: pass 'dlt_template_id' for Custom messages");
+    }
+    return;
+  }
+
+  // A panel SMS template: the server renders it from data and checks its length.
+}
+
+function optionalString(v: unknown, field: string): string | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== "string") {
+    throw new Error(`'${field}' must be a string`);
+  }
+  const t = v.trim();
+  return t === "" ? undefined : t;
 }
