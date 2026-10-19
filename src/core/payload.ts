@@ -1,5 +1,6 @@
 import { SendInput } from "../types";
 import { validateEmail, validatePhone } from "../utils/validators";
+import { isVoiceChannel, verifyVoice } from "../utils/voice";
 import { isValidDltId, isValidSmsSender, validateE164, validateSmsBody } from "../utils/sms";
 
 export function verifyPayload(input: SendInput) {
@@ -197,6 +198,11 @@ export function verifyPayload(input: SendInput) {
 
   if (channel === "SMS") {
     verifySms(input);
+    return;
+  }
+
+  if (isVoiceChannel(channel)) {
+    verifyVoice(input);
     return;
   }
 
