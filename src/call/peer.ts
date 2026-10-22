@@ -1,3 +1,4 @@
+import { RELIABLE_CHANNEL, UNRELIABLE_CHANNEL } from "./messages";
 import { readStats, StatsCursor, StatsSample } from "./stats";
 import type { CallMode, CallPlatform, ConnectionType, SignalData } from "./types";
 
@@ -26,7 +27,14 @@ export interface PeerLinkOptions {
   onReconnecting: (attempt: number) => void;
   onReconnected: () => void;
   onError: (code: string, message: string, cause?: unknown) => void;
+  /** A text message on one of the link's data channels (in-call chat / data). */
+  onChannelMessage?: (raw: string) => void;
+  /** A data channel opened or closed. */
+  onChannelState?: () => void;
 }
+
+/** Above this many queued bytes a data channel counts as congested (the server path is used). */
+const CHANNEL_BUFFER_MAX = 1 << 20;
 
 /**
  * One RTCPeerConnection to one remote participant, with perfect negotiation
@@ -59,8 +67,16 @@ export class PeerLink {
   private answererTimer: ReturnType<typeof setTimeout> | null = null;
   private everConnected = false;
   private statsCursor: StatsCursor | undefined;
+  private healthCursor: StatsCursor | undefined;
+  /** When the first health sample with a selected path was taken (bandwidth estimates ramp up after it). */
+  firstPathAt: number | null = null;
+  /** Key of the video encoding last applied with `applyVideo`. */
+  private videoKey = "";
   /** Last path seen in stats. */
   connection: ConnectionType | null = null;
+  /** Data channels for in-call messages (ordered + reliable, and unordered without retransmits). */
+  private reliableChannel: RTCDataChannel | null = null;
+  private unreliableChannel: RTCDataChannel | null = null;
 
   constructor(private o: PeerLinkOptions) {
     this.userId = o.userId;
@@ -92,11 +108,53 @@ export class PeerLink {
     this.pc.onconnectionstatechange = () => {
       if (this.pc.connectionState === "failed") this.requestRestart();
     };
+    // The answerer gets the initiator's message channels in-band.
+    this.pc.ondatachannel = (ev) => this.adoptChannel(ev.channel);
+    if (o.initiator && typeof this.pc.createDataChannel === "function") {
+      // Created before the first offer, so it carries the data section.
+      try {
+        this.adoptChannel(this.pc.createDataChannel(RELIABLE_CHANNEL, { ordered: true }));
+        this.adoptChannel(this.pc.createDataChannel(UNRELIABLE_CHANNEL, { ordered: false, maxRetransmits: 0 }));
+      } catch (err) {
+        o.onError("data_channel_failed", "Could not open a data channel; messages go through the server", err);
+      }
+    }
 
     if (o.initiator) {
       this.attachLocal();
     } else {
       this.answererTimer = p.setTimeout(() => this.attachLocal(), ANSWERER_FALLBACK_MS);
+    }
+  }
+
+  private adoptChannel(ch: RTCDataChannel): void {
+    if (this.closed || !ch) return;
+    if (ch.label === RELIABLE_CHANNEL) this.reliableChannel = ch;
+    else if (ch.label === UNRELIABLE_CHANNEL) this.unreliableChannel = ch;
+    else return; // not ours
+    ch.onmessage = (ev: MessageEvent) => {
+      if (!this.closed && typeof ev.data === "string") this.o.onChannelMessage?.(ev.data);
+    };
+    ch.onopen = ch.onclose = () => {
+      if (!this.closed) this.o.onChannelState?.();
+    };
+  }
+
+  /** Whether a message can go to this peer over a data channel now. */
+  channelOpen(reliable = true): boolean {
+    const ch = reliable ? this.reliableChannel : (this.unreliableChannel?.readyState === "open" ? this.unreliableChannel : this.reliableChannel);
+    return !this.closed && !!ch && ch.readyState === "open" && (ch.bufferedAmount ?? 0) < CHANNEL_BUFFER_MAX;
+  }
+
+  /** Sends one message over the data channel; false when it could not (use the server). */
+  sendOnChannel(text: string, reliable = true): boolean {
+    if (!this.channelOpen(reliable)) return false;
+    const ch = reliable || this.unreliableChannel?.readyState !== "open" ? this.reliableChannel! : this.unreliableChannel!;
+    try {
+      ch.send(text);
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -345,13 +403,21 @@ export class PeerLink {
     if (track) this.pc.addTrack(track, ...(stream ? [stream] : []));
   }
 
-  /** One stats sample; emits `connection` when the selected path changes. */
-  async sample(): Promise<StatsSample | null> {
+  /**
+   * One stats sample; emits `connection` when the selected path changes.
+   * `health` (the ~2 s checks) keeps its own interval counters, so it does
+   * not disturb the 10 s quality samples.
+   */
+  async sample(kind: "quality" | "health" = "quality"): Promise<StatsSample | null> {
     if (this.closed) return null;
     try {
       const report = await this.pc.getStats();
-      const s = readStats(report, this.o.platform.now(), this.statsCursor);
-      this.statsCursor = s.cursor;
+      const now = this.o.platform.now();
+      const s = readStats(report, now, kind === "health" ? this.healthCursor : this.statsCursor);
+      if (kind === "health") {
+        this.healthCursor = s.cursor;
+        if (s.connection && this.firstPathAt === null) this.firstPathAt = now;
+      } else this.statsCursor = s.cursor;
       if (s.connection && s.connection !== this.connection) {
         this.connection = s.connection;
         this.o.onConnection(s.connection);
@@ -360,6 +426,50 @@ export class PeerLink {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Sets the outgoing video encoding on every video sender (never audio):
+   * `encodings[0].maxBitrate`, `scaleResolutionDownBy` and `active` (false
+   * pauses video without dropping the track, so resuming is instant and
+   * needs no renegotiation). Does nothing when unchanged. Returns false when
+   * it could not be applied yet (e.g. before negotiation) — try again later.
+   */
+  async applyVideo(t: { maxBitrateKbps: number | null; scaleResolutionDownBy: number; active: boolean }): Promise<boolean> {
+    if (this.closed) return false;
+    const senders = this.pc.getSenders().filter((x) => x.track?.kind === "video");
+    const key = `${t.maxBitrateKbps}|${t.scaleResolutionDownBy}|${t.active}|${senders.length}`;
+    if (senders.length === 0) return true; // nothing to shape (no camera / screen)
+    // Never shaped and the target is the browser's default: leave the senders alone.
+    if (this.videoKey === "" && t.maxBitrateKbps === null && t.scaleResolutionDownBy <= 1 && t.active) return true;
+    if (key === this.videoKey) return true;
+    let ok = true;
+    for (const sender of senders) {
+      if (typeof sender.getParameters !== "function" || typeof sender.setParameters !== "function") continue;
+      try {
+        const params = sender.getParameters();
+        const enc = params.encodings;
+        if (!enc || enc.length === 0) {
+          ok = false; // not negotiated yet
+          continue;
+        }
+        const e = enc[0];
+        if (t.maxBitrateKbps === null) delete e.maxBitrate;
+        else e.maxBitrate = t.maxBitrateKbps * 1000;
+        e.scaleResolutionDownBy = Math.max(1, t.scaleResolutionDownBy);
+        e.active = t.active;
+        await sender.setParameters(params);
+      } catch {
+        ok = false;
+      }
+    }
+    if (ok) this.videoKey = key;
+    return ok;
+  }
+
+  /** Forget the applied video encoding (the sender changed). */
+  resetVideo(): void {
+    this.videoKey = "";
   }
 
   close(): void {
@@ -371,6 +481,17 @@ export class PeerLink {
     }
     this.pc.onnegotiationneeded = this.pc.onicecandidate = this.pc.ontrack = this.pc.onsignalingstatechange = null;
     this.pc.oniceconnectionstatechange = this.pc.onconnectionstatechange = null;
+    this.pc.ondatachannel = null;
+    for (const ch of [this.reliableChannel, this.unreliableChannel]) {
+      if (!ch) continue;
+      ch.onmessage = ch.onopen = ch.onclose = null;
+      try {
+        ch.close();
+      } catch {
+        // already closed
+      }
+    }
+    this.reliableChannel = this.unreliableChannel = null;
     try {
       this.pc.close();
     } catch {

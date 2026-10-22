@@ -27,6 +27,94 @@ export interface SendInput {
    * Authentication template approved in that language.
    */
   language?: string;
+  /**
+   * Retry-safe sends: the same key with the same request within 24 hours
+   * returns the first answer instead of sending again (sent as the
+   * `Idempotency-Key` header and the `idempotency_key` field). 1–255
+   * visible ASCII characters. A different request with a used key fails
+   * with `idempotency_conflict`.
+   */
+  idempotencyKey?: string;
+  /** Your own id for the message (≤ 128 chars), to find it with `messages.list`. */
+  reference?: string;
+}
+
+/** WhatsApp template header: text, media (by `link` or Meta media `id`) or a location. */
+export interface WhatsAppHeader {
+  type: "text" | "image" | "video" | "document" | "location";
+  text?: string;
+  link?: string;
+  id?: string;
+  /** Documents only. */
+  filename?: string;
+  latitude?: number;
+  longitude?: number;
+  name?: string;
+  address?: string;
+}
+
+/** A dynamic button parameter of an approved template. `index` is 0-based. */
+export interface WhatsAppButton {
+  index: number;
+  type: "url" | "quick_reply" | "copy_code" | "otp";
+  /** `url`: the dynamic URL suffix. */
+  text?: string;
+  /** `quick_reply`. */
+  payload?: string;
+  /** `copy_code` / `otp`. */
+  code?: string;
+}
+
+/** A media message (`template: "Custom"`): exactly one of `link` (https) or `id`. */
+export interface WhatsAppMedia {
+  type: "image" | "document" | "video" | "audio";
+  link?: string;
+  id?: string;
+  /** Not for audio; `body` is used when absent. */
+  caption?: string;
+  /** Documents only. */
+  filename?: string;
+}
+
+/**
+ * WhatsApp options: approved-template parameters (`template` = the Meta
+ * template name) or a media message (`template: "Custom"`).
+ */
+export interface WhatsAppOptions {
+  /** Meta language code (`en`, `en_US`, `es_419`). */
+  language?: string;
+  header?: WhatsAppHeader;
+  /** Positional `{{1}}…` values, or named values for NAMED templates. */
+  body?: string[] | Record<string, string>;
+  buttons?: WhatsAppButton[];
+  media?: WhatsAppMedia;
+}
+
+/** Email: per-message open / click tracking; omitted = the domain / organization setting. */
+export interface TrackingOverride {
+  opens?: boolean;
+  clicks?: boolean;
+}
+
+/**
+ * Push: send to many devices or later (`/sdk/send` with channel Push).
+ * With any of these set the answer is `data: { broadcast_id, audience,
+ * status: "scheduled", send_at }` and nothing is sent synchronously; follow
+ * it with `catzconnect.push.broadcast(id)` / `cancel(id)` and list its
+ * deliveries with `messages.list({ broadcastId })`. Server keys only (app
+ * and test keys are refused).
+ */
+export interface PushOptions {
+  /** Every active registered device of the project (leave `to` / `external_user_id` out). */
+  broadcast?: boolean;
+  /** Every device subscribed to this topic: 1–64 of `A-Z a-z 0-9 _ . ~ -`. */
+  topic?: string;
+  /**
+   * RFC 3339 with a zone (`2026-11-02T09:00:00Z`) or a `Date`; up to
+   * `PUSH_SCHEDULE_MAX_DAYS` (30) ahead. Works with `broadcast`, `topic`,
+   * `to` or `external_user_id`.
+   */
+  send_at?: string | Date;
 }
 
 export interface SendPayload {
@@ -90,6 +178,20 @@ export interface SendPayload {
    * routing. It must be one of the API key's call providers.
    */
   provider?: string;
+
+  /** WhatsApp: template parameters or media (see {@link WhatsAppOptions}). */
+  whatsapp?: WhatsAppOptions;
+  /** Email: open / click tracking for this message. */
+  tracking?: TrackingOverride;
+  /**
+   * Email: a subscription topic key of your organization (Email →
+   * Preferences in the panel): its opt-outs apply and the message's
+   * unsubscribe link unsubscribes from that topic only. Errors
+   * `invalid_topic`, `topic_email_only`.
+   */
+  topic?: string;
+  /** Push: broadcast, topic or scheduled send (see {@link PushOptions}). */
+  push?: PushOptions;
 }
 
 /** The server's answer: `{ success, message, data }`. */
@@ -115,6 +217,24 @@ export interface SmsSendData {
 export interface VoiceSendData {
   /** UUID of the queued phone call; `voice.*` webhook events carry it. */
   message_id: string;
+  [key: string]: unknown;
+}
+
+/**
+ * `data` every successful send now carries (servers from October 2026):
+ * the queued message's id (look it up with `messages.get`), `test: true`
+ * for a test (sandbox) key, `message_ids` when several were queued.
+ */
+export interface SendData {
+  message_id?: string;
+  message_ids?: string[];
+  status?: string;
+  channel?: string;
+  test?: boolean;
+  /** Push with `push` options: the broadcast / scheduled send created. */
+  broadcast_id?: string;
+  audience?: "all" | "topic" | "token" | "user";
+  send_at?: string;
   [key: string]: unknown;
 }
 

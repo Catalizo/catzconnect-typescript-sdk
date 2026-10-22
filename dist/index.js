@@ -37,17 +37,32 @@ __export(index_exports, {
   CALL_USER_ID_MAX: () => CALL_USER_ID_MAX,
   CallsApi: () => CallsApi,
   CatzApiError: () => CatzApiError,
+  ErrorCodes: () => ErrorCodes,
+  ManageApi: () => ManageApi,
+  MessagesApi: () => MessagesApi,
+  OtpApi: () => OtpApi,
+  PushApi: () => PushApi,
+  PushDevicesApi: () => PushDevicesApi,
   SMS_MAX_SEGMENTS: () => SMS_MAX_SEGMENTS,
   SUPPORTED_LANGUAGES: () => SUPPORTED_LANGUAGES,
   VOICE_MAX_CHARS: () => VOICE_MAX_CHARS,
   VOICE_MAX_REPEAT: () => VOICE_MAX_REPEAT,
+  WEBHOOK_EVENTS: () => WEBHOOK_EVENTS,
+  WHATSAPP_TEMPLATE_NAME: () => WHATSAPP_TEMPLATE_NAME,
   analyseSms: () => analyseSms,
   buildCallTokenPayload: () => buildCallTokenPayload,
   buildCreateCallPayload: () => buildCreateCallPayload,
+  buildListMessagesPayload: () => buildListMessagesPayload,
+  buildOtpStartPayload: () => buildOtpStartPayload,
+  buildOtpVerifyPayload: () => buildOtpVerifyPayload,
+  buildPushTopicChangePayload: () => buildPushTopicChangePayload,
+  buildRegisterDevicePayload: () => buildRegisterDevicePayload,
   buildSendPayload: () => buildSendPayload,
   catzconnect: () => catzconnect,
+  checkBaseUrl: () => checkBaseUrl,
   computeUserHash: () => computeUserHash,
   generateDeviceKeys: () => generateDeviceKeys,
+  isRetryableCode: () => isRetryableCode,
   isSealedPush: () => isSealedPush,
   isValidDltId: () => isValidDltId,
   isValidLanguage: () => isValidLanguage,
@@ -58,10 +73,16 @@ __export(index_exports, {
   normaliseLanguage: () => normaliseLanguage,
   openPushPayload: () => openPushPayload,
   parseVoiceRepeat: () => parseVoiceRepeat,
+  parseWebhookEvent: () => parseWebhookEvent,
+  pushTopics: () => pushTopics,
   validateCallUserId: () => validateCallUserId,
+  validateIdempotencyKey: () => validateIdempotencyKey,
+  validateReference: () => validateReference,
   validateVoiceText: () => validateVoiceText,
   verifyVoice: () => verifyVoice,
-  verifyWebhookSignature: () => verifyWebhookSignature
+  verifyWebhookSignature: () => verifyWebhookSignature,
+  verifyWhatsAppMedia: () => verifyWhatsAppMedia,
+  verifyWhatsAppOptions: () => verifyWhatsAppOptions
 });
 module.exports = __toCommonJS(index_exports);
 
@@ -73,6 +94,11 @@ var CatzApiError = class _CatzApiError extends Error {
     this.status = status;
     this.code = code;
     this.body = body;
+    try {
+      const j = JSON.parse(body);
+      if (j && typeof j === "object" && !Array.isArray(j)) this.details = j;
+    } catch {
+    }
   }
   /** Builds the error from a response body, reading `message` and `code` when it is JSON. */
   static from(status, body) {
@@ -89,13 +115,48 @@ var CatzApiError = class _CatzApiError extends Error {
     return new _CatzApiError(status, message, body, code);
   }
 };
+var LOCAL_HOSTS = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "::1", "[::1]", "10.0.2.2"]);
+function checkBaseUrl(raw, allowInsecure = false, what = "CATZCONNECT_BASE_URL") {
+  const url = raw.trim().replace(/\/+$/, "");
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    throw new Error(`${what} is not a valid URL: ${JSON.stringify(url)}`);
+  }
+  const scheme = u.protocol.toLowerCase();
+  if (scheme === "https:" || scheme === "wss:") return url;
+  if (scheme !== "http:" && scheme !== "ws:") {
+    throw new Error(`${what} must start with https:// (got ${JSON.stringify(u.protocol)})`);
+  }
+  if (allowInsecure || LOCAL_HOSTS.has(u.hostname.toLowerCase())) return url;
+  throw new Error(
+    `${what} uses plain ${scheme.slice(0, -1)}:// to ${u.hostname}: the API key and tokens would travel unencrypted. Use https://, or set CATZCONNECT_ALLOW_INSECURE_HTTP=1 / catzconnect.setAllowInsecureHttp(true) to allow it anyway.`
+  );
+}
+function insecureHttpFromEnv() {
+  const v = (typeof process !== "undefined" ? process.env?.CATZCONNECT_ALLOW_INSECURE_HTTP : void 0) ?? "";
+  return ["1", "true", "yes"].includes(v.trim().toLowerCase());
+}
+var DEFAULT_BASE_URL = "https://api.catzconnect.com";
+function baseUrlFromEnv() {
+  const v = (typeof process !== "undefined" ? process.env?.CATZCONNECT_BASE_URL : void 0) ?? "";
+  return v.trim() === "" ? DEFAULT_BASE_URL : v;
+}
 var HttpClient = class {
+  constructor() {
+    /** Allow a plain-http `CATZCONNECT_BASE_URL` to a non-local host (also `CATZCONNECT_ALLOW_INSECURE_HTTP=1`). */
+    this.allowInsecureHttp = false;
+  }
+  baseUrl() {
+    return checkBaseUrl(baseUrlFromEnv(), this.allowInsecureHttp || insecureHttpFromEnv());
+  }
   /**
    * POSTs an encrypted body and returns the decoded JSON. Non-2xx answers,
    * and 2xx answers with `success: false`, throw a {@link CatzApiError}.
    */
   async request(path, body, env) {
-    const baseURL = (process.env.CATZCONNECT_BASE_URL ?? "https://api.catzconnect.com").trim().replace(/\/+$/, "");
+    const baseURL = this.baseUrl();
     const apiKey = (env ? env.api_key : process.env.CATZCONNECT_API_KEY)?.trim();
     if (!apiKey) {
       throw new Error("Missing API key in environment");
@@ -124,8 +185,8 @@ var HttpClient = class {
     }
     return json;
   }
-  async post(path, body, env) {
-    const baseURL = (process.env.CATZCONNECT_BASE_URL ?? "https://api.catzconnect.com").trim().replace(/\/+$/, "");
+  async post(path, body, env, extraHeaders = {}) {
+    const baseURL = this.baseUrl();
     const apiKey = (env ? env.api_key : process.env.CATZCONNECT_API_KEY)?.trim();
     if (!apiKey) {
       throw new Error("Missing API key in environment");
@@ -133,6 +194,7 @@ var HttpClient = class {
     const res = await fetch(`${baseURL}${path}`, {
       method: "POST",
       headers: {
+        ...extraHeaders,
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`
       },
@@ -145,6 +207,24 @@ var HttpClient = class {
     return res.json();
   }
 };
+async function postPublic(path, body, baseUrl, allowInsecure = false) {
+  const base = checkBaseUrl(baseUrl ?? baseUrlFromEnv(), allowInsecure || insecureHttpFromEnv());
+  const res = await fetch(`${base}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(body)
+  });
+  const text = await res.text();
+  if (!res.ok) throw CatzApiError.from(res.status, text);
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    throw new CatzApiError(res.status, `The server sent a response that is not JSON: ${text.slice(0, 200)}`, text);
+  }
+  if (json && typeof json === "object" && json.success === false) throw CatzApiError.from(res.status, text);
+  return json;
+}
 
 // src/core/crypto.ts
 var import_libsodium_wrappers_sumo = __toESM(require("libsodium-wrappers-sumo"));
@@ -183,9 +263,9 @@ async function encrypt(payload, env) {
   };
 }
 function deriveKey(s, env) {
-  const pk = env ? env.private_key : process.env.CATZCONNECT_PRIVATE_KEY ?? "";
+  const pk2 = env ? env.private_key : process.env.CATZCONNECT_PRIVATE_KEY ?? "";
   const spk = env ? env.server_public_key : process.env.CATZCONNECT_SERVER_PUBLIC_KEY ?? "";
-  const clientPriv = b64ToU8(pk);
+  const clientPriv = b64ToU8(pk2);
   const serverPub = b64ToU8(spk);
   const shared = s.crypto_scalarmult(clientPriv, serverPub);
   const master = s.crypto_generichash(32, shared, null);
@@ -434,9 +514,166 @@ function buildVoicePayload(input) {
   return out;
 }
 
+// src/utils/whatsapp.ts
+var WHATSAPP_TEMPLATE_NAME = /^[a-z0-9_]{1,512}$/;
+var isHttps = (v) => typeof v === "string" && /^https:\/\/\S+$/.test(v) && v.length <= 2048;
+var isMediaId = (v) => typeof v === "string" && /^\d{1,64}$/.test(v);
+function checkMediaRef(kind, m, where) {
+  const hasLink = m.link !== void 0 && m.link !== null;
+  const hasId = m.id !== void 0 && m.id !== null;
+  if (hasLink === hasId) throw new Error(`${where}: give exactly one of 'link' (https) or 'id' (Meta media id)`);
+  if (hasLink && !isHttps(m.link)) throw new Error(`${where}.link must be an https:// URL`);
+  if (hasId && !isMediaId(m.id)) throw new Error(`${where}.id must be a Meta media id (digits)`);
+  if (m.filename !== void 0) {
+    if (kind !== "document") throw new Error(`${where}.filename is for documents only`);
+    if (typeof m.filename !== "string" || m.filename.length > 240 || /[\\/]/.test(m.filename)) {
+      throw new Error(`${where}.filename must be up to 240 characters without slashes`);
+    }
+  }
+}
+function verifyWhatsAppMedia(m) {
+  if (!m || typeof m !== "object") throw new Error("'whatsapp.media' must be an object");
+  if (!["image", "document", "video", "audio"].includes(m.type)) {
+    throw new Error("'whatsapp.media.type' must be image, document, video or audio");
+  }
+  checkMediaRef(m.type, m, "'whatsapp.media'");
+  if (m.caption !== void 0) {
+    if (m.type === "audio") throw new Error("'whatsapp.media.caption' is not allowed for audio");
+    if (typeof m.caption !== "string" || m.caption.length > 1024) throw new Error("'whatsapp.media.caption' is at most 1024 characters");
+  }
+}
+function checkParam(v, where) {
+  if (typeof v !== "string" || v.trim() === "" || v.length > 1024 || /[\n\t]/.test(v) || / {5,}/.test(v)) {
+    throw new Error(`${where} must be non-empty text of up to 1024 characters without new lines, tabs or 5+ spaces in a row`);
+  }
+}
+function verifyWhatsAppOptions(o) {
+  if (o === void 0 || o === null) return;
+  if (typeof o !== "object") throw new Error("'whatsapp' must be an object");
+  if (o.language !== void 0 && (typeof o.language !== "string" || !/^[A-Za-z]{2,3}(_[A-Za-z0-9]{2,4})?$/.test(o.language))) {
+    throw new Error("'whatsapp.language' must be a Meta language code such as en, en_US or es_419");
+  }
+  if (o.header !== void 0) {
+    const h = o.header;
+    if (h.type === "text") {
+      if (typeof h.text !== "string" || h.text.trim() === "" || h.text.length > 60) throw new Error("'whatsapp.header.text' must be 1\u201360 characters");
+    } else if (h.type === "image" || h.type === "video" || h.type === "document") {
+      checkMediaRef(h.type, h, "'whatsapp.header'");
+    } else if (h.type === "location") {
+      if (typeof h.latitude !== "number" || typeof h.longitude !== "number") throw new Error("'whatsapp.header' location needs latitude and longitude");
+    } else {
+      throw new Error("'whatsapp.header.type' must be text, image, video, document or location");
+    }
+  }
+  if (o.body !== void 0) {
+    if (Array.isArray(o.body)) o.body.forEach((v, i) => checkParam(v, `'whatsapp.body[${i}]'`));
+    else if (o.body && typeof o.body === "object") for (const [k, v] of Object.entries(o.body)) checkParam(v, `'whatsapp.body.${k}'`);
+    else throw new Error("'whatsapp.body' must be an array or an object of strings");
+  }
+  if (o.buttons !== void 0) {
+    if (!Array.isArray(o.buttons)) throw new Error("'whatsapp.buttons' must be an array");
+    const seen = /* @__PURE__ */ new Set();
+    for (const b of o.buttons) {
+      if (!Number.isInteger(b.index) || b.index < 0 || b.index > 9) throw new Error("'whatsapp.buttons[].index' must be 0\u20139");
+      if (seen.has(b.index)) throw new Error(`'whatsapp.buttons' lists index ${b.index} twice`);
+      seen.add(b.index);
+      if (b.type === "url") {
+        if (typeof b.text !== "string" || b.text === "" || /\s/.test(b.text) || b.text.length > 2e3) throw new Error("A url button needs 'text': the URL suffix without spaces");
+      } else if (b.type === "quick_reply") {
+        if (b.payload !== void 0 && (typeof b.payload !== "string" || b.payload.length > 256)) throw new Error("A quick_reply 'payload' is at most 256 characters");
+      } else if (b.type === "copy_code") {
+        if (typeof b.code !== "string" || b.code === "" || b.code.length > 20) throw new Error("A copy_code button needs 'code' of up to 20 characters");
+      } else if (b.type === "otp") {
+        if (typeof b.code !== "string" || !/^[A-Za-z0-9]{1,15}$/.test(b.code)) throw new Error("An otp button needs 'code': up to 15 letters or digits");
+      } else {
+        throw new Error("'whatsapp.buttons[].type' must be url, quick_reply, copy_code or otp");
+      }
+    }
+  }
+  if (o.media !== void 0) verifyWhatsAppMedia(o.media);
+}
+function verifyTracking(t, channel) {
+  if (t === void 0 || t === null) return;
+  if (channel !== "Email") throw new Error("'tracking' applies to the Email channel only");
+  if (typeof t !== "object") throw new Error("'tracking' must be an object { opens?, clicks? }");
+  for (const k of Object.keys(t)) {
+    if (k !== "opens" && k !== "clicks") throw new Error(`'tracking.${k}' is not a tracking option (opens, clicks)`);
+    const v = t[k];
+    if (v !== void 0 && typeof v !== "boolean") throw new Error(`'tracking.${k}' must be true or false`);
+  }
+}
+
 // src/core/payload.ts
+var EMAIL_TOPIC_KEY = /^[a-z0-9][a-z0-9_-]{0,39}$/;
+var PUSH_TOPIC_NAME = /^[A-Za-z0-9_.~-]{1,64}$/;
+function pushSendAt(v) {
+  if (v instanceof Date) {
+    if (Number.isNaN(v.getTime())) throw new Error("'push.send_at' is not a valid date");
+    return v.toISOString();
+  }
+  if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/i.test(v.trim()) || Number.isNaN(Date.parse(v))) {
+    throw new Error("'push.send_at' must be an RFC 3339 time with a time zone, e.g. 2026-11-02T09:00:00Z");
+  }
+  return v.trim();
+}
+function verifyTopicAndPush(input) {
+  const { channel, payload } = input;
+  if (payload.topic !== void 0 && payload.topic !== null) {
+    if (channel !== "Email") throw new Error("'topic' applies to the Email channel only \u2014 for push topics use push.topic");
+    if (typeof payload.topic !== "string" || !EMAIL_TOPIC_KEY.test(payload.topic)) {
+      throw new Error("'topic' must be a topic key: lower-case letters, digits, _ and -, up to 40 characters");
+    }
+  }
+  const p = payload.push;
+  if (p === void 0 || p === null) return;
+  if (channel !== "Push") throw new Error("'push' applies to the Push channel only");
+  if (typeof p !== "object") throw new Error("'push' must be an object");
+  const many = p.broadcast === true || p.topic !== void 0 && p.topic !== null;
+  if (p.broadcast === true && p.topic !== void 0 && p.topic !== null) throw new Error("Give push.broadcast or push.topic, not both");
+  if (p.topic !== void 0 && p.topic !== null && (typeof p.topic !== "string" || !PUSH_TOPIC_NAME.test(p.topic))) {
+    throw new Error("'push.topic' must be 1\u201364 characters of letters, digits, _ . ~ -");
+  }
+  if (p.send_at !== void 0 && p.send_at !== null) pushSendAt(p.send_at);
+  const hasTo = payload.to !== void 0 && payload.to !== null && payload.to !== "";
+  const hasUser = payload.external_user_id !== void 0 && payload.external_user_id !== null && payload.external_user_id !== "";
+  if (many && (hasTo || hasUser)) {
+    throw new Error("push.broadcast and push.topic send to many devices: leave 'to' and 'external_user_id' out");
+  }
+  if (many && payload.device_key !== void 0) {
+    throw new Error("'device_key' is only for one device token \u2014 registered devices use their own keys");
+  }
+}
 function verifyPayload(input) {
   const { type, channel, template, identity, payload } = input;
+  verifyTracking(payload.tracking, channel);
+  verifyTopicAndPush(input);
+  if (payload.whatsapp !== void 0 && channel !== "WhatsApp") {
+    throw new Error("'whatsapp' applies to the WhatsApp channel only");
+  }
+  if (channel === "WhatsApp" && template === "Custom" && payload.whatsapp?.media !== void 0) {
+    if (!identity) throw new Error("Missing 'identity'");
+    if (!payload.to || typeof payload.to !== "string") throw new Error("Missing 'to' in payload");
+    validatePhone(payload.to);
+    verifyWhatsAppMedia(payload.whatsapp.media);
+    return;
+  }
+  if (channel === "WhatsApp" && template !== "Otp" && template !== "Custom") {
+    if (!["Transactional", "Verification", "Promotional", "Notification"].includes(type)) {
+      throw new Error(`Unsupported combination: ${type}.${channel}.${template}`);
+    }
+    if (typeof template !== "string" || !WHATSAPP_TEMPLATE_NAME.test(template)) {
+      throw new Error("A WhatsApp template name is lower-case letters, digits and underscores (the name approved at Meta)");
+    }
+    if (!identity) throw new Error("Missing 'identity'");
+    if (!payload.to || typeof payload.to !== "string") throw new Error("Missing 'to' in payload");
+    validatePhone(payload.to);
+    if (payload.otp !== void 0 && (typeof payload.otp !== "string" || !/^[A-Za-z0-9]{1,15}$/.test(payload.otp))) {
+      throw new Error("'otp' must be up to 15 letters or digits");
+    }
+    verifyWhatsAppOptions(payload.whatsapp);
+    if (payload.whatsapp?.media !== void 0) throw new Error("'whatsapp.media' goes with template Custom; use 'whatsapp.header' for a template's media");
+    return;
+  }
   if (channel === "Email" && type === "Verification" && template === "Otp") {
     if (!identity) {
       throw new Error("Missing 'identity'");
@@ -529,10 +766,11 @@ function verifyPayload(input) {
     }
     const hasTo = payload.to !== void 0 && payload.to !== null && payload.to !== "";
     const hasUser = payload.external_user_id !== void 0 && payload.external_user_id !== null && payload.external_user_id !== "";
+    const many = payload.push?.broadcast === true || payload.push?.topic !== void 0 && payload.push?.topic !== null;
     if (hasTo && hasUser) {
       throw new Error("Give either 'to' (one device token) or 'external_user_id' (a user's registered devices), not both");
     }
-    if (!hasTo && !hasUser) {
+    if (!hasTo && !hasUser && !many) {
       throw new Error(
         "Missing 'to' in payload \u2014 the device's FCM registration token \u2014 or 'external_user_id' for a user's registered devices"
       );
@@ -866,6 +1104,401 @@ function isValidLanguage(value) {
   }
 }
 
+// src/devices.ts
+var PUSH_TOPIC_NAME2 = /^[A-Za-z0-9_.~-]{1,64}$/;
+var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function uuid(v, field2) {
+  if (typeof v !== "string" || !UUID_RE.test(v.trim())) throw new Error(`'${field2}' must be a message id (UUID)`);
+  return v.trim();
+}
+function pk(v) {
+  if (typeof v !== "string" || v.trim().length < 10 || v.trim().length > 100) throw new Error("'publishableKey' is required");
+  return v.trim();
+}
+function checkToken(v) {
+  if (typeof v !== "string" || v.trim().length < 32 || v.trim().length > 4096) {
+    throw new Error("'token' must be the device's FCM registration token");
+  }
+  return v.trim();
+}
+function buildRegisterDevicePayload(input) {
+  if (!["ios", "android", "web"].includes(input.platform)) throw new Error("'platform' must be ios, android or web");
+  const out = { publishable_key: pk(input.publishableKey), token: checkToken(input.token), platform: input.platform };
+  if (input.externalUserId !== void 0) {
+    const u = input.externalUserId;
+    if (typeof u !== "string" || u.length < 1 || [...u].length > 128 || /[\u0000-\u001f\u007f]/.test(u)) {
+      throw new Error("'externalUserId' must be 1\u2013128 characters");
+    }
+    out.external_user_id = u;
+  }
+  if (input.userHash !== void 0) out.user_hash = input.userHash;
+  if (input.appVersion !== void 0) {
+    if (typeof input.appVersion !== "string" || input.appVersion.length > 40) throw new Error("'appVersion' is at most 40 characters");
+    out.app_version = input.appVersion;
+  }
+  if (input.deviceKey !== void 0) out.device_key = input.deviceKey;
+  return out;
+}
+var PushDevicesApi = class {
+  constructor(options = {}) {
+    this.options = options;
+  }
+  post(path, body) {
+    return postPublic(path, body, this.options.baseUrl, this.options.allowInsecureHttp);
+  }
+  /** Register or refresh a device. Resolves `{ device_id, created }`. */
+  async register(input) {
+    const res = await this.post("/push/register", buildRegisterDevicePayload(input));
+    return res?.data ?? res;
+  }
+  /** Forget a token (sign-out, uninstall). Never fails for an unknown token. */
+  async unregister(publishableKey, deviceToken) {
+    const res = await this.post("/push/unregister", { publishable_key: pk(publishableKey), token: checkToken(deviceToken) });
+    return res?.data ?? res;
+  }
+  /**
+   * Subscribe this registered device to push topics (1–20 names of
+   * `A-Z a-z 0-9 _ . ~ -`). Fails with 404 when the token was not
+   * registered first. Resolves `{ topics }`.
+   */
+  async subscribeTopics(publishableKey, deviceToken, topics) {
+    const res = await this.post("/push/topics/subscribe", { publishable_key: pk(publishableKey), token: checkToken(deviceToken), topics: pushTopics(topics) });
+    return res?.data ?? res;
+  }
+  /** Unsubscribe this registered device from push topics. */
+  async unsubscribeTopics(publishableKey, deviceToken, topics) {
+    const res = await this.post("/push/topics/unsubscribe", { publishable_key: pk(publishableKey), token: checkToken(deviceToken), topics: pushTopics(topics) });
+    return res?.data ?? res;
+  }
+  /**
+   * Report that a notification was opened; `messageId` is its `catz_id` data
+   * field. Pass the device's FCM registration token whenever the app has it:
+   * the open is then verified (only the device the notification was
+   * delivered to can report it) and the first verified report fires the
+   * `push.opened` webhook. Without a token the open is still recorded (as
+   * in apps built before the token was sent) but no webhook fires.
+   * Resolves `{ recorded, verified }`.
+   */
+  async opened(publishableKey, messageId, deviceToken) {
+    const body = { publishable_key: pk(publishableKey), message_id: uuid(messageId, "messageId") };
+    if (deviceToken !== void 0 && deviceToken !== null && String(deviceToken).trim() !== "") body.token = checkToken(deviceToken);
+    const res = await this.post("/push/opened", body);
+    return res?.data ?? res;
+  }
+};
+function pushTopics(v, max = 20) {
+  if (!Array.isArray(v) || v.length === 0 || v.length > max) throw new Error(`'topics' must list 1\u2013${max} topic names`);
+  return v.map((t) => pushTopic(t));
+}
+function pushTopic(t) {
+  if (typeof t !== "string" || !PUSH_TOPIC_NAME2.test(t.trim())) throw new Error("A push topic is 1\u201364 characters of letters, digits, _ . ~ -");
+  return t.trim();
+}
+
+// src/devapi.ts
+var ErrorCodes = {
+  // Organization / platform
+  ORGANIZATION_SUSPENDED: "organization_suspended",
+  SENDING_PAUSED: "sending_paused",
+  FEATURE_NOT_IN_PLAN: "feature_not_in_plan",
+  PLAN_REQUIRED: "plan_required",
+  CHANNEL_LIMIT_REACHED: "channel_limit_reached",
+  DAILY_LIMIT_REACHED: "daily_limit_reached",
+  MONTHLY_LIMIT_REACHED: "monthly_limit_reached",
+  MINUTES_CAP_REACHED: "minutes_cap_reached",
+  // API key policy
+  KEY_EXPIRED: "key_expired",
+  IP_NOT_ALLOWED: "ip_not_allowed",
+  KEY_RATE_LIMITED: "key_rate_limited",
+  KEY_SEND_LIMIT: "key_send_limit",
+  NOT_ALLOWED_FOR_APP_KEYS: "not_allowed_for_app_keys",
+  NOT_ALLOWED_FOR_TEST_KEYS: "not_allowed_for_test_keys",
+  MANAGEMENT_SCOPE_REQUIRED: "management_scope_required",
+  // WhatsApp
+  WHATSAPP_INVALID_TEMPLATE: "whatsapp_invalid_template",
+  WHATSAPP_TEMPLATE_NOT_APPROVED: "whatsapp_template_not_approved",
+  WHATSAPP_TEMPLATE_LANGUAGE_REQUIRED: "whatsapp_template_language_required",
+  WHATSAPP_INVALID_TEMPLATE_PARAMS: "whatsapp_invalid_template_params",
+  WHATSAPP_INVALID_MEDIA: "whatsapp_invalid_media",
+  WHATSAPP_WINDOW_CLOSED: "whatsapp_window_closed",
+  // Idempotency and references
+  IDEMPOTENCY_CONFLICT: "idempotency_conflict",
+  IDEMPOTENCY_IN_PROGRESS: "idempotency_in_progress",
+  INVALID_IDEMPOTENCY_KEY: "invalid_idempotency_key",
+  INVALID_REFERENCE: "invalid_reference",
+  // Lookups
+  MESSAGE_NOT_FOUND: "message_not_found",
+  // Hosted OTP
+  OTP_INVALID: "otp_invalid",
+  OTP_EXPIRED: "otp_expired",
+  OTP_NOT_FOUND: "otp_not_found",
+  OTP_ALREADY_VERIFIED: "otp_already_verified",
+  OTP_ATTEMPTS_EXCEEDED: "otp_attempts_exceeded",
+  OTP_RESEND_COOLDOWN: "otp_resend_cooldown",
+  OTP_SEND_LIMIT: "otp_send_limit",
+  // Management API
+  UNSUPPORTED_CHANNEL: "unsupported_channel",
+  UNKNOWN_OPERATION: "unknown_operation",
+  INVALID_REQUEST: "invalid_request",
+  NOT_FOUND: "not_found",
+  CONFLICT: "conflict",
+  // Opt-outs, topics, push broadcasts, resends
+  INVALID_TOPIC: "invalid_topic",
+  TOPIC_EMAIL_ONLY: "topic_email_only",
+  RECIPIENT_SUPPRESSED: "recipient_suppressed",
+  WHATSAPP_OPTED_OUT: "whatsapp_opted_out",
+  NOT_CANCELABLE: "not_cancelable",
+  NOT_RESENDABLE: "not_resendable",
+  CONTENT_GONE: "content_gone"
+};
+function isRetryableCode(code) {
+  return code === ErrorCodes.SENDING_PAUSED || code === ErrorCodes.KEY_RATE_LIMITED || code === ErrorCodes.KEY_SEND_LIMIT || code === ErrorCodes.IDEMPOTENCY_IN_PROGRESS || code === ErrorCodes.OTP_RESEND_COOLDOWN;
+}
+async function sdkPost(http, path, body, env) {
+  const enc = await encrypt(body, env);
+  if (!enc) throw new Error("Encryption failed");
+  const res = await http.request(path, enc, env);
+  return res && typeof res === "object" && "data" in res ? res.data : res;
+}
+function str(v, field2, max = 320) {
+  if (typeof v !== "string" || v.trim() === "") throw new Error(`Missing '${field2}'`);
+  if (v.length > max) throw new Error(`'${field2}' must be at most ${max} characters`);
+  return v.trim();
+}
+function optInt(v, field2, min, max) {
+  if (v === void 0 || v === null) return void 0;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < min || v > max) {
+    throw new Error(`'${field2}' must be a whole number from ${min} to ${max}`);
+  }
+  return v;
+}
+var UUID_RE2 = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function uuid2(v, field2) {
+  if (typeof v !== "string" || !UUID_RE2.test(v.trim())) throw new Error(`'${field2}' must be a message id (UUID)`);
+  return v.trim();
+}
+function validateReference(v) {
+  if (v === void 0 || v === null) return void 0;
+  if (typeof v !== "string") throw new Error("'reference' must be a string");
+  const t = v.trim();
+  if (t === "") return void 0;
+  if ([...t].length > 128 || /[\u0000-\u001f\u007f]/.test(t)) {
+    throw new Error("'reference' must be up to 128 characters without line breaks or control characters");
+  }
+  return t;
+}
+function validateIdempotencyKey(v) {
+  if (v === void 0 || v === null) return void 0;
+  if (typeof v !== "string" || !/^[\x21-\x7e]{1,255}$/.test(v.trim())) {
+    throw new Error("'idempotencyKey' must be 1\u2013255 visible ASCII characters without spaces");
+  }
+  return v.trim();
+}
+var CHANNELS = ["email", "sms", "whatsapp", "push", "voice"];
+function buildListMessagesPayload(input) {
+  const out = {};
+  if (input.recipient !== void 0) out.recipient = str(input.recipient, "recipient");
+  if (input.reference !== void 0) out.reference = validateReference(input.reference);
+  if (input.broadcastId !== void 0) out.broadcast_id = uuid2(input.broadcastId, "broadcastId");
+  if (out.recipient === void 0 && out.reference === void 0 && out.broadcast_id === void 0) {
+    throw new Error("Give 'recipient', 'reference' or 'broadcastId'");
+  }
+  if (input.channel !== void 0) {
+    const c = String(input.channel).toLowerCase();
+    if (!CHANNELS.includes(c)) throw new Error("'channel' must be email, sms, whatsapp, push or voice");
+    out.channel = c;
+  }
+  const limit = optInt(input.limit, "limit", 1, 100);
+  if (limit !== void 0) out.limit = limit;
+  if (input.before !== void 0) out.before = str(input.before, "before", 64);
+  return out;
+}
+var MessagesApi = class {
+  constructor(http = new HttpClient()) {
+    this.http = http;
+  }
+  /** One message by the `message_id` a send returned, with its event timeline. */
+  async get(messageId, env) {
+    return sdkPost(this.http, "/sdk/messages/get", { message_id: uuid2(messageId, "messageId") }, env);
+  }
+  /** Recent messages to a recipient and/or with a `reference`, newest first. */
+  async list(input, env) {
+    const d = await sdkPost(this.http, "/sdk/messages/list", buildListMessagesPayload(input), env);
+    return { messages: Array.isArray(d?.messages) ? d.messages : [], next_before: d?.next_before ?? null };
+  }
+};
+var OTP_CHANNELS = { email: "Email", sms: "SMS", whatsapp: "WhatsApp", voice: "Voice" };
+function buildOtpStartPayload(input) {
+  const ch = OTP_CHANNELS[String(input.channel ?? "").toLowerCase()];
+  if (!ch) throw new Error("'channel' must be Email, SMS, WhatsApp or Voice");
+  const out = { channel: ch, to: str(input.to, "to") };
+  const opt = (k, v) => {
+    if (typeof v === "string" && v.trim() !== "") out[k] = v.trim();
+  };
+  opt("identity", input.identity);
+  opt("template", input.template);
+  opt("language", input.language);
+  opt("gateway", input.gateway);
+  opt("sender", input.sender);
+  opt("dlt_template_id", input.dltTemplateId);
+  opt("provider", input.provider);
+  const nums = [
+    ["code_length", input.codeLength, 4, 10],
+    ["ttl_seconds", input.ttlSeconds, 60, 3600],
+    ["max_attempts", input.maxAttempts, 1, 10],
+    ["resend_cooldown_seconds", input.resendCooldownSeconds, 10, 3600]
+  ];
+  for (const [k, v, min, max] of nums) {
+    const n = optInt(v, k, min, max);
+    if (n !== void 0) out[k] = n;
+  }
+  if (input.whatsapp !== void 0) out.whatsapp = input.whatsapp;
+  if (input.data !== void 0) {
+    for (const [k, v] of Object.entries(input.data)) {
+      if (typeof v !== "string") throw new Error(`'data.${k}' must be a string`);
+    }
+    out.data = input.data;
+  }
+  const ref = validateReference(input.reference);
+  if (ref !== void 0) out.reference = ref;
+  return out;
+}
+function buildOtpVerifyPayload(input) {
+  const code = typeof input.code === "string" ? input.code.replace(/[\s-]/g, "") : "";
+  if (!/^[A-Za-z0-9]{1,15}$/.test(code)) throw new Error("'code' must be the 1\u201315 letters or digits that were sent");
+  if (input.verificationId !== void 0) {
+    return { verification_id: uuid2(input.verificationId, "verificationId"), code };
+  }
+  const ch = OTP_CHANNELS[String(input.channel ?? "").toLowerCase()];
+  if (!ch || typeof input.to !== "string" || input.to.trim() === "") {
+    throw new Error("Give 'verificationId', or 'channel' and 'to'");
+  }
+  return { channel: ch, to: input.to.trim(), code };
+}
+var OtpApi = class {
+  constructor(http = new HttpClient()) {
+    this.http = http;
+  }
+  /** Send a code (again: a resend replaces the code, after the cooldown). */
+  async start(input, env) {
+    return sdkPost(this.http, "/sdk/otp/start", buildOtpStartPayload(input), env);
+  }
+  /** Check a code. Resolves only when it is correct. */
+  async verify(input, env) {
+    return sdkPost(this.http, "/sdk/otp/verify", buildOtpVerifyPayload(input), env);
+  }
+};
+function suppressionTopic(channel, topic) {
+  if (topic === void 0 || topic === null) return void 0;
+  if (String(channel).toLowerCase() !== "email") throw new Error("'topic' applies to email suppressions only");
+  if (typeof topic !== "string" || !EMAIL_TOPIC_KEY.test(topic)) throw new Error("'topic' must be a topic key");
+  return topic;
+}
+var ManageApi = class {
+  constructor(http = new HttpClient()) {
+    this.http = http;
+    this.templates = {
+      list: (channel, env) => this.call("templates", "list", channel ? { channel } : {}, env),
+      get: (idOrName, env) => this.call("templates", "get", { ...idOrName }, env),
+      save: (t, env) => {
+        str(t.name, "name", 80);
+        if (typeof t.body !== "string") throw new Error("Missing 'body'");
+        return this.call("templates", "save", { ...t }, env);
+      },
+      delete: (id, env) => this.call("templates", "delete", { id }, env),
+      /** A language version (`de`, `pt-BR`) of a template. */
+      saveVariant: (v, env) => this.call("templates", "variant_save", { ...v }, env),
+      deleteVariant: (templateId, language, env) => this.call("templates", "variant_delete", { template_id: templateId, language }, env)
+    };
+    this.webhooks = {
+      list: (env) => this.call("webhooks", "list", {}, env),
+      /** Create (no `id`; the answer has the signing `secret`, once) or update. */
+      save: (w, env) => {
+        str(w.url, "url", 2048);
+        if (!Array.isArray(w.events) || w.events.length === 0) throw new Error("Choose at least one event");
+        return this.call("webhooks", "save", { ...w }, env);
+      },
+      delete: (id, env) => this.call("webhooks", "delete", { id }, env)
+    };
+    this.suppressions = {
+      list: (q = {}, env) => this.call("suppressions", "list", { ...q }, env),
+      /** `detail` as a string, or `{ detail?, topic? }` (topic: email only). */
+      add: (channel, address, options, env) => {
+        const o = typeof options === "string" ? { detail: options } : options ?? {};
+        const topic = suppressionTopic(channel, o.topic);
+        return this.call(
+          "suppressions",
+          "add",
+          { channel, address: str(address, "address"), ...o.detail ? { detail: o.detail } : {}, ...topic ? { topic } : {} },
+          env
+        );
+      },
+      /** `remove("a@b.co")`, `remove("+15550100", "sms")` or `remove({ id })` / `remove({ channel, address, topic })`. */
+      remove: (target, channel, env) => {
+        const t = typeof target === "string" ? { address: target, channel } : target;
+        if (t.id !== void 0) return this.call("suppressions", "remove", { id: uuid2(t.id, "id") }, env);
+        const body = { address: str(t.address, "address") };
+        if (t.channel) body.channel = t.channel;
+        const topic = suppressionTopic(String(t.channel ?? "email"), t.topic);
+        if (topic) body.topic = topic;
+        return this.call("suppressions", "remove", body, env);
+      }
+    };
+    this.keys = {
+      list: (env) => this.call("keys", "list", {}, env),
+      create: (k, env) => {
+        str(k.name, "name", 100);
+        if (k.kind !== void 0 && k.kind !== "server" && k.kind !== "test") throw new Error("'kind' must be server or test");
+        return this.call("keys", "create", { ...k }, env);
+      },
+      rotate: (id, rotateEte = false, env) => this.call("keys", "rotate", { id, rotate_ete: rotateEte }, env),
+      revoke: (id, env) => this.call("keys", "revoke", { id }, env),
+      /** Replaces the whole policy (omitted fields are cleared). */
+      setPolicy: (id, policy, env) => this.call("keys", "policy", { id, ...policy }, env)
+    };
+  }
+  call(resource, op, body, env) {
+    return sdkPost(this.http, `/sdk/manage/${resource}/${op}`, body, env);
+  }
+};
+function buildPushTopicChangePayload(input) {
+  const out = { identity: str(input.identity, "identity", 200), topic: pushTopic(input.topic) };
+  if (input.tokens !== void 0) {
+    if (!Array.isArray(input.tokens) || input.tokens.length > 1e3) throw new Error("'tokens' must list at most 1000 tokens");
+    out.tokens = input.tokens.map((t) => checkToken(t));
+  }
+  if (input.externalUserId !== void 0) out.external_user_id = str(input.externalUserId, "externalUserId", 128);
+  const hasTokens = Array.isArray(out.tokens) && out.tokens.length > 0;
+  if (!hasTokens && out.external_user_id === void 0) {
+    throw new Error("Give 'tokens' (registered devices) or 'externalUserId'");
+  }
+  return out;
+}
+var PushApi = class {
+  constructor(http = new HttpClient()) {
+    this.http = http;
+  }
+  /** Status and counters of a broadcast or scheduled push. */
+  async broadcast(broadcastId, env) {
+    return sdkPost(this.http, "/sdk/push/broadcast", { broadcast_id: uuid2(broadcastId, "broadcastId") }, env);
+  }
+  /** Stop one that has not finished (`not_cancelable` once it has). Devices already queued still get it. */
+  async cancel(broadcastId, env) {
+    return sdkPost(this.http, "/sdk/push/cancel", { broadcast_id: uuid2(broadcastId, "broadcastId") }, env);
+  }
+  /** Subscribe registered devices to a topic. Resolves `{ topic, devices }` (devices matched). */
+  async subscribe(input, env) {
+    return sdkPost(this.http, "/sdk/push/topic/subscribe", buildPushTopicChangePayload(input), env);
+  }
+  async unsubscribe(input, env) {
+    return sdkPost(this.http, "/sdk/push/topic/unsubscribe", buildPushTopicChangePayload(input), env);
+  }
+  /** A project's topics with their subscribed devices. */
+  async topics(identity, env) {
+    return sdkPost(this.http, "/sdk/push/topics", { identity: str(identity, "identity", 200) }, env);
+  }
+};
+
 // src/core/webhook.ts
 var import_node_crypto = require("crypto");
 function verifyWebhookSignature(rawBody, header, secret, toleranceSeconds = 300, nowSeconds = Math.floor(Date.now() / 1e3)) {
@@ -888,6 +1521,58 @@ function verifyWebhookSignature(rawBody, header, secret, toleranceSeconds = 300,
     if (!/^[0-9a-fA-F]{64}$/.test(sig)) return false;
     return (0, import_node_crypto.timingSafeEqual)(expected, Buffer.from(sig, "hex"));
   });
+}
+var WEBHOOK_EVENTS = [
+  "email.sent",
+  "email.failed",
+  "email.bounced",
+  "email.opened",
+  "email.clicked",
+  "email.received",
+  "whatsapp.status",
+  "whatsapp.inbound",
+  "whatsapp.read",
+  "push.sent",
+  "push.failed",
+  "sms.sent",
+  "sms.delivered",
+  "sms.failed",
+  "sms.unknown",
+  "call.ringing",
+  "call.started",
+  "call.ended",
+  "call.missed",
+  "call.declined",
+  "call.canceled",
+  "call.failed",
+  "participant.joined",
+  "participant.left",
+  "voice.answered",
+  "voice.completed",
+  "voice.failed",
+  "voice.unknown",
+  "email.complained",
+  "email.unsubscribed",
+  "push.opened",
+  "sms.inbound",
+  "sms.opt_out",
+  "whatsapp.opt_out"
+];
+function parseWebhookEvent(rawBody, header, secret, toleranceSeconds = 300, nowSeconds = Math.floor(Date.now() / 1e3)) {
+  if (!verifyWebhookSignature(rawBody, header, secret, toleranceSeconds, nowSeconds)) {
+    throw new Error("Invalid webhook signature");
+  }
+  const text = typeof rawBody === "string" ? rawBody : Buffer.from(rawBody).toString("utf8");
+  let j;
+  try {
+    j = JSON.parse(text);
+  } catch {
+    throw new Error("The webhook body is not JSON");
+  }
+  if (!j || typeof j !== "object" || typeof j.type !== "string" || typeof j.id !== "string") {
+    throw new Error("The webhook body is not a Catz Connect event");
+  }
+  return { ...j, test: j.test === true || j?.data?.test === true, data: j.data ?? {} };
 }
 function computeUserHash(externalUserId, identitySecret) {
   if (!identitySecret) throw new Error("computeUserHash: identity secret is required");
@@ -941,9 +1626,18 @@ function canonicalChannel(input) {
 }
 function buildSendPayload(input) {
   const out = buildChannelPayload(canonicalChannel(input));
+  if (out.push && typeof out.push === "object") {
+    const p = { ...out.push };
+    if (p.send_at !== void 0 && p.send_at !== null) p.send_at = pushSendAt(p.send_at);
+    out.push = p;
+  }
   if (input.language !== void 0 && input.language !== null) {
     out.language = normaliseLanguage(input.language);
   }
+  const idem = validateIdempotencyKey(input.idempotencyKey);
+  if (idem !== void 0) out.idempotency_key = idem;
+  const ref = validateReference(input.reference);
+  if (ref !== void 0) out.reference = ref;
   return out;
 }
 function buildChannelPayload(input) {
@@ -980,6 +1674,16 @@ var CatzConnect = class {
     this.http = new HttpClient();
     /** Voice & Video calls: `create`, `token`, `get`, `end`. */
     this.calls = new CallsApi(this.http);
+    /** Status and event timeline of sent messages: `get`, `list`. */
+    this.messages = new MessagesApi(this.http);
+    /** Hosted one-time codes: `start`, `verify`. */
+    this.otp = new OtpApi(this.http);
+    /** Management API (key with the management scope): templates, webhooks, suppressions, keys. */
+    this.manage = new ManageApi(this.http);
+    /** Push device registry with the publishable key: `register`, `unregister`, `opened`, `subscribeTopics`, `unsubscribeTopics`. */
+    this.pushDevices = new PushDevicesApi();
+    /** Push broadcasts / scheduled pushes and topic subscriptions (server key): `broadcast`, `cancel`, `subscribe`, `unsubscribe`, `topics`. */
+    this.push = new PushApi(this.http);
   }
   /**
    * The `language` used by every `send()` that does not set one (`en`,
@@ -988,6 +1692,15 @@ var CatzConnect = class {
    */
   setDefaultLanguage(language) {
     this.defaultLanguage = language === void 0 || language === null ? void 0 : normaliseLanguage(language);
+  }
+  /**
+   * Allow a plain `http://` `CATZCONNECT_BASE_URL` to a host other than
+   * localhost / 127.0.0.1 / ::1 / 10.0.2.2 (same as
+   * `CATZCONNECT_ALLOW_INSECURE_HTTP=1`). Default false: such a URL throws,
+   * since the API key would be sent unencrypted.
+   */
+  setAllowInsecureHttp(allow) {
+    this.http.allowInsecureHttp = !!allow;
   }
   /** The default set with {@link setDefaultLanguage}, normalised (`"de"`), or `undefined`. */
   getDefaultLanguage() {
@@ -1008,12 +1721,14 @@ var CatzConnect = class {
       throw new Error("Encryption failed");
     }
     try {
-      const res = await this.http.post("/sdk/send", enc, env);
+      const headers = {};
+      if (typeof finalPayload.idempotency_key === "string") headers["Idempotency-Key"] = finalPayload.idempotency_key;
+      const res = await this.http.post("/sdk/send", enc, env, headers);
       return res;
     } catch (err) {
       throw Object.assign(
         new Error(`Failed to send ${input.type}.${input.channel}.${input.template}: ${err.message}`),
-        { status: err?.status, code: err?.code, body: err?.body, cause: err }
+        { status: err?.status, code: err?.code, details: err?.details, body: err?.body, cause: err }
       );
     }
   }
@@ -1028,17 +1743,32 @@ var catzconnect = new CatzConnect();
   CALL_USER_ID_MAX,
   CallsApi,
   CatzApiError,
+  ErrorCodes,
+  ManageApi,
+  MessagesApi,
+  OtpApi,
+  PushApi,
+  PushDevicesApi,
   SMS_MAX_SEGMENTS,
   SUPPORTED_LANGUAGES,
   VOICE_MAX_CHARS,
   VOICE_MAX_REPEAT,
+  WEBHOOK_EVENTS,
+  WHATSAPP_TEMPLATE_NAME,
   analyseSms,
   buildCallTokenPayload,
   buildCreateCallPayload,
+  buildListMessagesPayload,
+  buildOtpStartPayload,
+  buildOtpVerifyPayload,
+  buildPushTopicChangePayload,
+  buildRegisterDevicePayload,
   buildSendPayload,
   catzconnect,
+  checkBaseUrl,
   computeUserHash,
   generateDeviceKeys,
+  isRetryableCode,
   isSealedPush,
   isValidDltId,
   isValidLanguage,
@@ -1049,8 +1779,14 @@ var catzconnect = new CatzConnect();
   normaliseLanguage,
   openPushPayload,
   parseVoiceRepeat,
+  parseWebhookEvent,
+  pushTopics,
   validateCallUserId,
+  validateIdempotencyKey,
+  validateReference,
   validateVoiceText,
   verifyVoice,
-  verifyWebhookSignature
+  verifyWebhookSignature,
+  verifyWhatsAppMedia,
+  verifyWhatsAppOptions
 });

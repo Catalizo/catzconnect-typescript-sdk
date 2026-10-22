@@ -502,3 +502,24 @@ test("joined after a resume: a peer with a new epoch is re-offered on a new link
   assert.ok(ws.sentOf("signal").filter((m) => m.to === "p2" && m.data.sdp?.type === "offer").length >= 2);
   assert.equal(client.peers.length, 1);
 });
+
+test("relayOnly (client option) forces iceTransportPolicy relay, also over rtcConfig", async () => {
+  const { pc } = await joinedAsCaller({ relayOnly: true, rtcConfig: { iceTransportPolicy: "all" } });
+  assert.equal(pc.config.iceTransportPolicy, "relay");
+  assert.equal(pc.config.iceServers.length, 2);
+});
+
+test("relayOnly per join overrides the client option", async () => {
+  for (const [clientOpt, joinOpt, want] of [[false, true, "relay"], [true, false, "all"], [undefined, undefined, "all"]]) {
+    FakePC.all = [];
+    FakeWS.all = [];
+    const ctx = await connected({ relayOnly: clientOpt });
+    const jp = ctx.client.join("c1", { audio: true, video: true, relayOnly: joinOpt });
+    await flush();
+    ctx.ws.receive({ t: "joined", pid: "p1", call: { id: "c1", mode: "video", engine: "catz" },
+      peers: [{ pid: "p2", user_id: "bob" }], polite_for: { p2: false }, resume: false, ice_servers: CALL_ICE, ice_ttl: 3600 });
+    await jp;
+    await flush();
+    assert.equal(FakePC.all.at(-1).config.iceTransportPolicy, want, `client=${clientOpt} join=${joinOpt}`);
+  }
+});

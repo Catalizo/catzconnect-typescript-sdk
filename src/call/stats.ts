@@ -17,6 +17,12 @@ export interface StatsSample {
   jitterMs: number | null;
   lossPct: number | null;
   bitrateKbps: number | null;
+  /** `availableOutgoingBitrate` of the selected pair (kbps), when the browser reports it. */
+  availableOutgoingKbps: number | null;
+  /** Loss of what this side sends, from the peer's receiver reports (`remote-inbound-rtp` fractionLost, %). */
+  remoteLossPct: number | null;
+  /** True when an outbound video stream is limited by CPU (`qualityLimitationReason: "cpu"`). */
+  cpuLimited: boolean;
   cursor: StatsCursor;
 }
 
@@ -56,13 +62,21 @@ export function readStats(report: RTCStatsReport | Map<string, any>, now: number
       : "direct"
     : null;
 
-  const rttMs = typeof pair?.currentRoundTripTime === "number" ? Math.round(pair.currentRoundTripTime * 1000) : null;
+  let rttMs = typeof pair?.currentRoundTripTime === "number" ? Math.round(pair.currentRoundTripTime * 1000) : null;
+  const availableOutgoingKbps =
+    typeof pair?.availableOutgoingBitrate === "number" && pair.availableOutgoingBitrate >= 0
+      ? Math.round(pair.availableOutgoingBitrate / 1000)
+      : null;
 
   let jitterSum = 0;
   let jitterN = 0;
   let packetsLost = 0;
   let packetsReceived = 0;
   let rtpBytes = 0;
+  let cpuLimited = false;
+  let remoteLossSum = 0;
+  let remoteLossN = 0;
+  let remoteRttMs: number | null = null;
   for (const s of all.values()) {
     if (s.type === "inbound-rtp") {
       if (typeof s.jitter === "number") {
@@ -74,8 +88,17 @@ export function readStats(report: RTCStatsReport | Map<string, any>, now: number
       rtpBytes += s.bytesReceived ?? 0;
     } else if (s.type === "outbound-rtp") {
       rtpBytes += s.bytesSent ?? 0;
+      if ((s.kind ?? s.mediaType) === "video" && s.qualityLimitationReason === "cpu") cpuLimited = true;
+    } else if (s.type === "remote-inbound-rtp") {
+      if (typeof s.fractionLost === "number" && s.fractionLost >= 0) {
+        remoteLossSum += s.fractionLost;
+        remoteLossN += 1;
+      }
+      if (typeof s.roundTripTime === "number") remoteRttMs = Math.round(s.roundTripTime * 1000);
     }
   }
+  if (rttMs === null) rttMs = remoteRttMs;
+  const remoteLossPct = remoteLossN > 0 ? Math.round((remoteLossSum / remoteLossN) * 1000) / 10 : null;
   const bytes = pair ? (pair.bytesSent ?? 0) + (pair.bytesReceived ?? 0) : rtpBytes;
   const jitterMs = jitterN > 0 ? Math.round((jitterSum / jitterN) * 1000) : null;
 
@@ -104,6 +127,9 @@ export function readStats(report: RTCStatsReport | Map<string, any>, now: number
     jitterMs,
     lossPct,
     bitrateKbps,
+    availableOutgoingKbps,
+    remoteLossPct,
+    cpuLimited,
     cursor: { at: now, bytes, packetsLost, packetsReceived },
   };
 }

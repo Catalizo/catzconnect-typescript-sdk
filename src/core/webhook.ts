@@ -47,6 +47,82 @@ export function verifyWebhookSignature(
   });
 }
 
+/** Every event a webhook can subscribe to. */
+export const WEBHOOK_EVENTS = [
+  "email.sent",
+  "email.failed",
+  "email.bounced",
+  "email.opened",
+  "email.clicked",
+  "email.received",
+  "whatsapp.status",
+  "whatsapp.inbound",
+  "whatsapp.read",
+  "push.sent",
+  "push.failed",
+  "sms.sent",
+  "sms.delivered",
+  "sms.failed",
+  "sms.unknown",
+  "call.ringing",
+  "call.started",
+  "call.ended",
+  "call.missed",
+  "call.declined",
+  "call.canceled",
+  "call.failed",
+  "participant.joined",
+  "participant.left",
+  "voice.answered",
+  "voice.completed",
+  "voice.failed",
+  "voice.unknown",
+  "email.complained",
+  "email.unsubscribed",
+  "push.opened",
+  "sms.inbound",
+  "sms.opt_out",
+  "whatsapp.opt_out",
+] as const;
+export type WebhookEventType = (typeof WEBHOOK_EVENTS)[number] | (string & {});
+
+/** A webhook delivery's body. `test` is true for events of test (sandbox) keys. */
+export interface WebhookEvent<D = Record<string, unknown>> {
+  id: string;
+  type: WebhookEventType;
+  created_at: string;
+  organization_id: string;
+  test: boolean;
+  data: D;
+}
+
+/**
+ * Verify the `Catz-Signature` header and parse the body. Throws when the
+ * signature does not match (or is too old) or the body is not an event.
+ */
+export function parseWebhookEvent<D = Record<string, unknown>>(
+  rawBody: string | Uint8Array,
+  header: string | null | undefined,
+  secret: string,
+  toleranceSeconds = 300,
+  nowSeconds: number = Math.floor(Date.now() / 1000),
+): WebhookEvent<D> {
+  if (!verifyWebhookSignature(rawBody, header, secret, toleranceSeconds, nowSeconds)) {
+    throw new Error("Invalid webhook signature");
+  }
+  const text = typeof rawBody === "string" ? rawBody : Buffer.from(rawBody).toString("utf8");
+  let j: any;
+  try {
+    j = JSON.parse(text);
+  } catch {
+    throw new Error("The webhook body is not JSON");
+  }
+  if (!j || typeof j !== "object" || typeof j.type !== "string" || typeof j.id !== "string") {
+    throw new Error("The webhook body is not a Catz Connect event");
+  }
+  return { ...j, test: j.test === true || j?.data?.test === true, data: (j.data ?? {}) as D };
+}
+
 /**
  * The `user_hash` for `POST /push/register`: hex HMAC-SHA256 of the
  * `external_user_id`, keyed with the push project's identity secret

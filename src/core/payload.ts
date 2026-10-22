@@ -2,9 +2,90 @@ import { SendInput } from "../types";
 import { validateEmail, validatePhone } from "../utils/validators";
 import { isVoiceChannel, verifyVoice } from "../utils/voice";
 import { isValidDltId, isValidSmsSender, validateE164, validateSmsBody } from "../utils/sms";
+import { WHATSAPP_TEMPLATE_NAME, verifyTracking, verifyWhatsAppMedia, verifyWhatsAppOptions } from "../utils/whatsapp";
+
+/** Email subscription topic keys: `[a-z0-9]` then up to 39 of `[a-z0-9_-]`. */
+export const EMAIL_TOPIC_KEY = /^[a-z0-9][a-z0-9_-]{0,39}$/;
+/** Push topic names: 1–64 of `A-Z a-z 0-9 _ . ~ -`. */
+export const PUSH_TOPIC_NAME = /^[A-Za-z0-9_.~-]{1,64}$/;
+
+/** RFC 3339 with a zone (or a valid Date) → the string sent. */
+export function pushSendAt(v: unknown): string {
+  if (v instanceof Date) {
+    if (Number.isNaN(v.getTime())) throw new Error("'push.send_at' is not a valid date");
+    return v.toISOString();
+  }
+  if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/i.test(v.trim()) || Number.isNaN(Date.parse(v))) {
+    throw new Error("'push.send_at' must be an RFC 3339 time with a time zone, e.g. 2026-11-02T09:00:00Z");
+  }
+  return v.trim();
+}
+
+/** `topic` (email) and `push` (push options): where they apply and their shape. */
+export function verifyTopicAndPush(input: SendInput): void {
+  const { channel, payload } = input;
+  if (payload.topic !== undefined && payload.topic !== null) {
+    if (channel !== "Email") throw new Error("'topic' applies to the Email channel only — for push topics use push.topic");
+    if (typeof payload.topic !== "string" || !EMAIL_TOPIC_KEY.test(payload.topic)) {
+      throw new Error("'topic' must be a topic key: lower-case letters, digits, _ and -, up to 40 characters");
+    }
+  }
+  const p = payload.push;
+  if (p === undefined || p === null) return;
+  if (channel !== "Push") throw new Error("'push' applies to the Push channel only");
+  if (typeof p !== "object") throw new Error("'push' must be an object");
+  const many = p.broadcast === true || (p.topic !== undefined && p.topic !== null);
+  if (p.broadcast === true && p.topic !== undefined && p.topic !== null) throw new Error("Give push.broadcast or push.topic, not both");
+  if (p.topic !== undefined && p.topic !== null && (typeof p.topic !== "string" || !PUSH_TOPIC_NAME.test(p.topic))) {
+    throw new Error("'push.topic' must be 1–64 characters of letters, digits, _ . ~ -");
+  }
+  if (p.send_at !== undefined && p.send_at !== null) pushSendAt(p.send_at);
+  const hasTo = payload.to !== undefined && payload.to !== null && payload.to !== "";
+  const hasUser = payload.external_user_id !== undefined && payload.external_user_id !== null && payload.external_user_id !== "";
+  if (many && (hasTo || hasUser)) {
+    throw new Error("push.broadcast and push.topic send to many devices: leave 'to' and 'external_user_id' out");
+  }
+  if (many && payload.device_key !== undefined) {
+    throw new Error("'device_key' is only for one device token — registered devices use their own keys");
+  }
+}
 
 export function verifyPayload(input: SendInput) {
   const { type, channel, template, identity, payload } = input;
+
+  verifyTracking(payload.tracking, channel);
+  verifyTopicAndPush(input);
+  if (payload.whatsapp !== undefined && channel !== "WhatsApp") {
+    throw new Error("'whatsapp' applies to the WhatsApp channel only");
+  }
+
+  // WhatsApp media message: template Custom with whatsapp.media (any type).
+  if (channel === "WhatsApp" && template === "Custom" && payload.whatsapp?.media !== undefined) {
+    if (!identity) throw new Error("Missing 'identity'");
+    if (!payload.to || typeof payload.to !== "string") throw new Error("Missing 'to' in payload");
+    validatePhone(payload.to);
+    verifyWhatsAppMedia(payload.whatsapp.media);
+    return;
+  }
+
+  // WhatsApp approved template, sent by its Meta name.
+  if (channel === "WhatsApp" && template !== "Otp" && template !== "Custom") {
+    if (!["Transactional", "Verification", "Promotional", "Notification"].includes(type)) {
+      throw new Error(`Unsupported combination: ${type}.${channel}.${template}`);
+    }
+    if (typeof template !== "string" || !WHATSAPP_TEMPLATE_NAME.test(template)) {
+      throw new Error("A WhatsApp template name is lower-case letters, digits and underscores (the name approved at Meta)");
+    }
+    if (!identity) throw new Error("Missing 'identity'");
+    if (!payload.to || typeof payload.to !== "string") throw new Error("Missing 'to' in payload");
+    validatePhone(payload.to);
+    if (payload.otp !== undefined && (typeof payload.otp !== "string" || !/^[A-Za-z0-9]{1,15}$/.test(payload.otp))) {
+      throw new Error("'otp' must be up to 15 letters or digits");
+    }
+    verifyWhatsAppOptions(payload.whatsapp);
+    if (payload.whatsapp?.media !== undefined) throw new Error("'whatsapp.media' goes with template Custom; use 'whatsapp.header' for a template's media");
+    return;
+  }
 
   if (channel === "Email" && type === "Verification" && template === "Otp") {
     if (!identity) {
@@ -141,12 +222,14 @@ export function verifyPayload(input: SendInput) {
     const hasTo = payload.to !== undefined && payload.to !== null && payload.to !== "";
     const hasUser =
       payload.external_user_id !== undefined && payload.external_user_id !== null && payload.external_user_id !== "";
+    // A broadcast / topic push has no single recipient (checked above).
+    const many = payload.push?.broadcast === true || (payload.push?.topic !== undefined && payload.push?.topic !== null);
 
     if (hasTo && hasUser) {
       throw new Error("Give either 'to' (one device token) or 'external_user_id' (a user's registered devices), not both");
     }
 
-    if (!hasTo && !hasUser) {
+    if (!hasTo && !hasUser && !many) {
       throw new Error(
         "Missing 'to' in payload — the device's FCM registration token — or 'external_user_id' for a user's registered devices",
       );

@@ -33,6 +33,14 @@ CATZCONNECT_SERVER_PUBLIC_KEY=server_base64_public_key
 
 > ⚠️ Never expose these values in frontend/public environments.
 
+`CATZCONNECT_BASE_URL` (optional, default `https://api.catzconnect.com`) must
+be `https://`. Plain `http://` is accepted only for `localhost`, `127.0.0.1`,
+`[::1]` and `10.0.2.2` (local development); any other `http://` URL throws
+before a request is sent, since the API key would travel unencrypted. To
+allow it anyway (e.g. a TLS-terminating sidecar on a private network) set
+`CATZCONNECT_ALLOW_INSECURE_HTTP=1` or call
+`catzconnect.setAllowInsecureHttp(true)`.
+
 ---
 
 ## 🚀 Usage
@@ -454,17 +462,71 @@ client.leave();                       // leave the call, release camera and mic
 client.close();                       // done with the client
 ```
 
-**Methods:** `connect()`, `join(callId, { audio?, video?, stream? })`,
+**Methods:** `connect()`, `join(callId, { audio?, video?, stream?, relayOnly? })`,
 `accept(callId, opts?)`, `decline(callId)`, `cancel(callId?)`, `leave()`,
 `setMuted("audio" | "video", muted)`, `isMuted(kind)`, `switchCamera()`,
-`shareScreen()`, `stopShare()`, `collectStats()`, `close()`; `on(event, fn)`
+`shareScreen()`, `stopShare()`, `collectStats()`, `checkHealth()`, `close()`; `on(event, fn)`
 (returns an unsubscribe function), `once`, `off`. Read-only: `connected`,
-`callId`, `pid`, `localMediaStream`, `peers`, `remoteStream(pid)`.
+`callId`, `pid`, `localMediaStream`, `peers`, `remoteStream(pid)`,
+`activeWarnings`.
 
 **Events:** `incoming`, `state`, `peer-joined`, `peer-left`, `track`
 (one `MediaStream` per peer), `local-stream`, `connection`, `quality`
 (every 10 s), `reconnecting`, `reconnected` (`scope: "signaling" | "peer"`),
-`provider`, `error`, `closed`.
+`provider`, `warning`, `warning-cleared`, `error`, `closed`.
+
+**Warnings.** There is no participant cap in the client; when something may
+degrade the call the client emits `warning` once (and `warning-cleared` when
+it is over, or when the call ends). `client.activeWarnings` lists the ones in
+effect. Each `CallWarning` has `code`, `message` (English default — localise
+by `code`), `callId`, `participants?`, `source` (`"server"` or `"client"`),
+`severity` (`"info"` or `"warning"`) and `at` (ms).
+
+| Code | Source | When |
+| --- | --- | --- |
+| `large_call` | server | A peer-to-peer call has many participants (server's `CALLS_P2P_WARN_AT`, default 5); cleared when it drops below. |
+| `relay_busy` | server | The TURN relay is near capacity; cleared under 75 %. |
+| `relay_unavailable` | server | The relay is down or refused this participant: the call may not connect on strict networks. |
+| `poor_network` | client | Estimated uplink below what the peers need, loss > 8 % or RTT > 600 ms, for 6 s. |
+| `device_overloaded` | client | The video encoder is CPU-limited for 6 s. |
+| `video_reduced` | client (info) | Adaptive video lowered the outgoing bitrate/resolution. |
+| `video_paused` | client | Video stopped (under 150 kbps per peer) to keep audio clear; cleared when it resumes. |
+
+Other codes may come from newer servers; show `message` for them.
+
+```ts
+import { CatzCallClient, type CallWarning } from "catzconnect/call";
+
+const texts: Record<string, string> = {           // your translations
+  large_call: "Call quality may drop — many people are in this call",
+  relay_unavailable: "Calls aren't available on this network right now",
+  poor_network: "Your connection is weak",
+  video_paused: "Your video is paused to keep audio clear",
+};
+const render = () => {
+  const w = client.activeWarnings.find((x) => x.severity === "warning") ?? client.activeWarnings[0];
+  banner.hidden = !w;
+  if (w) banner.textContent = texts[w.code] ?? w.message;
+};
+client.on("warning", (w: CallWarning) => render());
+client.on("warning-cleared", () => render());
+```
+
+**Adaptive video** (default; `new CatzCallClient({ adaptiveVideo: false })`
+turns it off). Every 2 s (`healthIntervalMs`) the client reads `getStats()`.
+In a call with several peers it splits the estimated uplink
+(`availableOutgoingBitrate`) across them — clamp(available / peers, 150 kbps,
+1.5 Mbps) per peer, with `scaleResolutionDownBy` 1 · 1.5 · 2 · 3 as the
+budget shrinks — through `RTCRtpSender.setParameters`, and emits
+`video_reduced`. Under 150 kbps per peer it pauses video
+(`encodings[0].active = false`; the camera track stays, so resuming needs no
+renegotiation), emits `video_paused`, and retries with backoff once the link
+is calm. Audio is never touched. A 1:1 call keeps the browser's own bitrate
+control unless video has to pause.
+
+**Peer-to-peer first.** ICE uses `iceTransportPolicy: "all"` (unless
+`relayOnly`) with the server's ICE servers in the order given — STUN first —
+so a direct path is tried first and TURN is the fallback.
 
 **Staying connected.** ICE tries direct paths first and falls back to our
 relay (UDP, then TCP, then TLS — `turns:` on 5349) inside the same call;
@@ -476,6 +538,20 @@ reconnects with exponential backoff and jitter, renews the token through
 `getToken`, sends `resume` within the server's 30 s grace (or joins again
 after it) and flushes signals queued meanwhile. TURN credentials are
 refreshed in place (`ice_refresh`).
+
+**Hiding IP addresses (relay-only).** By default ICE also offers this
+device's local and public addresses, so the other participants can learn
+them. `new CatzCallClient({ relayOnly: true })` (every call) or
+`join(callId, { relayOnly: true })` / `accept(callId, { relayOnly: true })`
+(one call; overrides the client option) sets `iceTransportPolicy: "relay"`:
+media only flows through the TURN relay, which costs some latency and relay
+bandwidth. It needs TURN on the server — without TURN credentials a
+relay-only call cannot connect. `relayOnly` wins over
+`rtcConfig.iceTransportPolicy`.
+
+The signaling `url` must be `wss://` (`ws://` only to localhost, 127.0.0.1,
+::1 or 10.0.2.2, or with `allowInsecureHttp: true`); otherwise the
+constructor throws.
 
 #### React
 
@@ -525,3 +601,78 @@ CatzConnect records the end.
 
 For tests, `new CatzCallClient({ token, platform: { WebSocket, RTCPeerConnection, MediaStream, mediaDevices, setTimeout, … } })`
 swaps the browser built-ins (see `test/fakes.mjs`).
+
+## Message status, retry-safe sends, test keys, hosted OTP (2.0.0)
+
+```ts
+import { catzconnect, ErrorCodes, CatzApiError } from "catzconnect";
+
+// Retry-safe: the same key + same request within 24 h returns the first answer.
+const res = await catzconnect.send({ channel: "Email", type: "Transactional", template: "Custom", identity: "hello",
+  payload: { to: "ana@example.com", subject: "Receipt", body: "<p>…</p>", tracking: { opens: false } },
+  idempotencyKey: `receipt-${orderId}`, reference: `order-${orderId}` });
+
+const m = await catzconnect.messages.get(res.data.message_id);      // status + events
+const page = await catzconnect.messages.list({ reference: `order-${orderId}` });
+
+// Hosted OTP: the server makes, sends and checks the code.
+const { verification_id } = await catzconnect.otp.start({ channel: "SMS", to: "+919876543210" });
+try {
+  await catzconnect.otp.verify({ verificationId: verification_id, code: typed });
+} catch (e) {
+  if (e instanceof CatzApiError && e.code === ErrorCodes.OTP_INVALID) console.log(e.details?.attempts_remaining);
+}
+
+// WhatsApp approved template / media
+await catzconnect.send({ channel: "WhatsApp", type: "Transactional", template: "order_update", identity: "919578456444",
+  payload: { to: "+919876543210", whatsapp: { language: "en_US", body: ["Ravi", "#1234"] } } });
+```
+
+**Test keys** (panel → API keys → Create key → Test key): sends are validated
+but never delivered or billed; answers carry `data.test: true`, statuses are
+simulated (an email to `bounce…@` bounces, numbers ending `0000` and push
+tokens starting `fail` fail) and webhooks arrive with `"test": true`
+(`parseWebhookEvent(...).test`). `otp.start` returns the `code` for test keys.
+
+**Management API** (`catzconnect.manage.*`): templates (and language versions),
+webhooks, suppressions and API keys, with a server key that has the management
+scope (panel → API keys → row menu → Allow management API).
+
+**Push devices** (in the app or on your server, publishable key only):
+`catzconnect.pushDevices.register({ publishableKey, token, platform: "web", externalUserId, userHash })`.
+In a browser, service worker or React Native app import the class from the
+browser-safe entry instead — the main entry needs Node (`node:crypto`, `Buffer`):
+
+```ts
+import { PushDevicesApi } from "catzconnect/push";
+const devices = new PushDevicesApi({ baseUrl: "https://api.catzconnect.com" });
+await devices.register({ publishableKey, token: fcmToken, platform: "web" });
+```
+
+## Email topics, push broadcasts and topics (2.0.0)
+
+```ts
+// Email under a subscription topic (Email → Preferences in the panel): its
+// opt-outs apply and the unsubscribe link leaves only that topic.
+await catzconnect.send({ channel: "Email", type: "Transactional", template: "Custom", identity: "news",
+  payload: { to: "ana@example.com", subject: "October", body: "<p>…</p>", topic: "newsletter" } });
+
+// Push to every device, a topic, or later (server key). Nothing is sent synchronously.
+const b = await catzconnect.send({ channel: "Push", type: "Notification", template: "Notification", identity: "my-firebase",
+  payload: { title: "Sale", body: "Today only", push: { topic: "deals", send_at: new Date("2026-11-02T09:00:00Z") } } });
+await catzconnect.push.broadcast(b.data.broadcast_id);              // status, queued, skipped, over_quota
+await catzconnect.push.cancel(b.data.broadcast_id);
+const deliveries = await catzconnect.messages.list({ broadcastId: b.data.broadcast_id });
+
+// Topic subscriptions: from your server …
+await catzconnect.push.subscribe({ identity: "my-firebase", topic: "deals", externalUserId: user.id });
+// … or in the app, with the publishable key (after register), from "catzconnect/push".
+await new PushDevicesApi().subscribeTopics(publishableKey, fcmToken, ["deals"]);
+```
+
+Broadcasts, topics and scheduled pushes are refused for app keys
+(`not_allowed_for_app_keys`) and test keys (`not_allowed_for_test_keys`).
+Suppressions are kept per channel: `manage.suppressions.add("whatsapp", "+919876543210")`,
+`add("email", "ana@example.com", { topic: "newsletter" })`, `remove({ id })`.
+New webhook events: `email.complained`, `email.unsubscribed`, `push.opened`,
+`sms.inbound`, `sms.opt_out`, `whatsapp.opt_out`.

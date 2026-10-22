@@ -87,3 +87,8 @@ export async function openPushPayload(
     link: parsed.link ?? undefined,
   };
 }
+
+// Device registry (register / unregister / topics / opened) with the
+// project's publishable key — no Node built-ins, safe in the app itself.
+export { PushDevicesApi, buildRegisterDevicePayload, pushTopics } from "./devices";
+export type { PushPlatform, RegisterDeviceInput, PushDevicesOptions } from "./devices";

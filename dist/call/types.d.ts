@@ -1,31 +1,19 @@
-/** A small typed event emitter. Listener errors are caught so one bad handler cannot break the call. */
-declare class Emitter<E extends {
-    [K in keyof E]: unknown;
-}> {
-    private handlers;
-    /** Subscribe; returns a function that unsubscribes. */
-    on<K extends keyof E>(event: K, fn: (payload: E[K]) => void): () => void;
-    /** Subscribe for one event only. */
-    once<K extends keyof E>(event: K, fn: (payload: E[K]) => void): () => void;
-    off<K extends keyof E>(event: K, fn: (payload: E[K]) => void): void;
-    protected emit<K extends keyof E>(event: K, payload: E[K]): void;
-}
-
+import type { CallWarning, CallWarningCleared } from "./warnings";
 /**
  * Types for the browser call client (`catzconnect/call`) and the signaling
  * protocol it speaks (`/rtc/v1/ws`, JSON text frames `{ t, ... }`).
  */
-type CallMode = "audio" | "video";
-type CallStatus = "ringing" | "active" | "ended" | "missed" | "declined" | "canceled" | "failed";
-type ConnectionType = "direct" | "relay";
+export type CallMode = "audio" | "video";
+export type CallStatus = "ringing" | "active" | "ended" | "missed" | "declined" | "canceled" | "failed";
+export type ConnectionType = "direct" | "relay";
 /** An ICE server as the server hands it out (our STUN/TURN relay). */
-interface IceServerInfo {
+export interface IceServerInfo {
     urls: string[] | string;
     username?: string;
     credential?: string;
 }
 /** The call as the signaling server describes it. Unknown fields are kept. */
-interface CallInfo {
+export interface CallInfo {
     id: string;
     mode: CallMode;
     engine: string;
@@ -42,7 +30,7 @@ interface CallInfo {
     [key: string]: unknown;
 }
 /** A remote participant in the mesh. */
-interface PeerInfo {
+export interface PeerInfo {
     pid: string;
     user_id: string;
     /** Join epoch of this participant (incremented each time it joins anew, e.g. from another device). */
@@ -53,7 +41,7 @@ interface PeerInfo {
  * LiveKit, …). Join with that provider's own SDK using these values; this
  * client creates no peer connections for such a call.
  */
-interface ProviderInfo {
+export interface ProviderInfo {
     name: string;
     room: string;
     token: string;
@@ -62,11 +50,11 @@ interface ProviderInfo {
     extra?: Record<string, unknown>;
 }
 /** A participant of this user that is in its reconnect grace and can be resumed. */
-interface ResumeInfo {
+export interface ResumeInfo {
     call_id: string;
     pid: string;
 }
-interface HelloMessage {
+export interface HelloMessage {
     t: "hello";
     /** The external user id this token belongs to. */
     you: string;
@@ -78,12 +66,18 @@ interface HelloMessage {
         max_frame_bytes?: number;
         ping_interval_secs?: number;
         resume_grace_secs?: number;
+        /** In-call message caps (see `MessageLimits`). */
+        chat_max_chars?: number;
+        data_max_bytes?: number;
+        messages_per_sec?: number;
+        messages_burst?: number;
+        messages_relay?: boolean;
     };
     /** The first entry of `resume_all`, absent when there is none. */
     resume?: ResumeInfo;
     resume_all?: ResumeInfo[];
 }
-interface JoinedMessage {
+export interface JoinedMessage {
     t: "joined";
     call: CallInfo;
     peers: PeerInfo[];
@@ -98,7 +92,7 @@ interface JoinedMessage {
     ice_ttl?: number;
     [key: string]: unknown;
 }
-type SignalData = {
+export type SignalData = {
     sdp: {
         type: RTCSdpType;
         sdp?: string;
@@ -108,7 +102,7 @@ type SignalData = {
 } | {
     restart: true;
 };
-type ServerMessage = HelloMessage | {
+export type ServerMessage = HelloMessage | {
     t: "incoming";
     call: CallInfo;
 } | JoinedMessage | {
@@ -143,6 +137,41 @@ type ServerMessage = HelloMessage | {
     code: string;
     message: string;
     call_id?: string | null;
+    id?: string | null;
+}
+/** In-call chat relayed by the server (`from` is the sender's pid; `to` is set for a private message). */
+ | {
+    t: "chat";
+    call_id: string;
+    id: string;
+    from: string;
+    user_id: string;
+    to: string | null;
+    text: string;
+    ts: number;
+}
+/** App data relayed by the server. */
+ | {
+    t: "data";
+    call_id: string;
+    id: string;
+    from: string;
+    user_id: string;
+    to: string | null;
+    payload: unknown;
+    ts: number;
+}
+/** Something may degrade the call (`large_call`, `relay_busy`, `relay_unavailable`, or a newer code). */
+ | {
+    t: "warning";
+    call_id?: string;
+    code: string;
+    participants?: number;
+    message?: string;
+} | {
+    t: "warning_cleared";
+    call_id?: string;
+    code: string;
 } | {
     t: "ping";
     ts: number;
@@ -150,7 +179,7 @@ type ServerMessage = HelloMessage | {
     t: "pong";
     ts?: number | null;
 };
-type ClientMessage = {
+export type ClientMessage = {
     t: "join";
     call_id: string;
     media: {
@@ -198,9 +227,21 @@ type ClientMessage = {
     t: "resume";
     call_id: string;
     pid: string;
+} | {
+    t: "chat";
+    call_id: string;
+    id: string;
+    text: string;
+    to?: string;
+} | {
+    t: "data";
+    call_id: string;
+    id: string;
+    payload: unknown;
+    to?: string;
 };
 /** One quality sample for one peer (every 10 s). */
-interface PeerQuality {
+export interface PeerQuality {
     callId: string;
     pid: string;
     userId: string;
@@ -212,7 +253,7 @@ interface PeerQuality {
     /** A rough grade from rtt and loss: good (< 300 ms, < 3 %), fair, poor (> 600 ms or > 10 %). */
     level: "good" | "fair" | "poor" | "unknown";
 }
-interface IncomingCall {
+export interface IncomingCall {
     call: CallInfo;
     callId: string;
     from?: string;
@@ -220,22 +261,77 @@ interface IncomingCall {
     engine: string;
     metadata?: Record<string, unknown> | null;
 }
-interface JoinResult {
+export interface JoinResult {
     call: CallInfo;
     /** This participant's id, when the server sent it. */
     pid: string | null;
     peers: PeerInfo[];
     provider?: ProviderInfo;
 }
-interface CallErrorEvent {
+export interface CallErrorEvent {
     code: string;
     message: string;
     callId?: string;
     pid?: string;
+    /** The in-call message (chat / data) the server refused, by id. */
+    messageId?: string;
     cause?: unknown;
 }
+/** How a message reached (or left) this client. */
+export type MessageVia = "p2p" | "relay";
+/** An in-call chat message from another participant. */
+export interface CallChatMessage {
+    callId: string;
+    /** Sender-chosen id (unique per sender). */
+    id: string;
+    /** Sender's pid. */
+    from: string;
+    /** Sender's user id ("" when not known yet). */
+    userId: string;
+    text: string;
+    /** This client's pid when the message was sent to it alone; null when sent to everyone. */
+    to: string | null;
+    /** True when it was sent to this participant only. */
+    private: boolean;
+    /** Send time, ms (the server's clock when relayed, the sender's when peer-to-peer). */
+    ts: number;
+    via: MessageVia;
+}
+/** App-defined data from another participant (any JSON value). */
+export interface CallDataMessage {
+    callId: string;
+    id: string;
+    from: string;
+    userId: string;
+    payload: unknown;
+    to: string | null;
+    private: boolean;
+    ts: number;
+    via: MessageVia;
+}
+/** What `sendChat` / `sendData` did with a message. */
+export interface SentMessage {
+    id: string;
+    ts: number;
+    /** `p2p`: over data channels; `relay`: through the server (queued while signaling reconnects). */
+    via: MessageVia;
+    to: string | null;
+}
+export interface SendMessageOptions {
+    /** A participant's pid: send to that participant only. Default everyone. */
+    to?: string;
+}
+export interface SendDataOptions extends SendMessageOptions {
+    /**
+     * Default true: ordered, retransmitted until delivered. False: the
+     * unordered, no-retransmit channel (lower latency, may drop — cursors,
+     * live positions); through the server it is not queued while signaling
+     * is down.
+     */
+    reliable?: boolean;
+}
 /** Every event `CatzCallClient` emits, and its payload. */
-interface CatzCallEvents {
+export interface CatzCallEvents {
     /** Someone is calling this user (sent while the call rings). */
     incoming: IncomingCall;
     /** A call's status changed (ringing → active → ended/missed/declined/canceled/failed). */
@@ -295,13 +391,26 @@ interface CatzCallEvents {
         provider: ProviderInfo;
     };
     error: CallErrorEvent;
+    /**
+     * Something may degrade the call: from the server (`large_call`,
+     * `relay_busy`, `relay_unavailable`) or the client's own checks
+     * (`poor_network`, `device_overloaded`, `video_reduced`, `video_paused`).
+     * Emitted once when it starts; see `activeWarnings`.
+     */
+    warning: CallWarning;
+    /** A warning is over (also emitted for every active warning when the call ends). */
+    "warning-cleared": CallWarningCleared;
     /** The client was closed (by `close()`, or because it cannot authenticate any more). */
     closed: {
         reason: string;
     };
+    /** In-call chat from another participant (your own sends are not echoed). */
+    chat: CallChatMessage;
+    /** App data from another participant. */
+    data: CallDataMessage;
 }
 /** Browser built-ins the client uses; override only in tests or unusual runtimes. */
-interface CallPlatform {
+export interface CallPlatform {
     WebSocket: typeof WebSocket;
     RTCPeerConnection: typeof RTCPeerConnection;
     mediaDevices?: MediaDevices;
@@ -320,7 +429,7 @@ interface CallPlatform {
     now: () => number;
     random: () => number;
 }
-interface CatzCallOptions {
+export interface CatzCallOptions {
     /** A user token from `catzconnect.calls.token(userId)` on your backend. */
     token?: string;
     /**
@@ -329,146 +438,43 @@ interface CatzCallOptions {
      * call survives token expiry and WebSocket reconnects.
      */
     getToken?: () => Promise<string>;
-    /** Signaling URL. Default `wss://api.catzconnect.com/rtc/v1/ws` (use `ws_url` from `calls.token`). */
+    /**
+     * Signaling URL. Default `wss://api.catzconnect.com/rtc/v1/ws` (use `ws_url` from `calls.token`).
+     * Must be `wss://`; `ws://` only to localhost / 127.0.0.1 / ::1 / 10.0.2.2 unless `allowInsecureHttp`.
+     */
     url?: string;
+    /** Accept a `ws://` signaling `url` to any host (the token travels unencrypted). Default false. */
+    allowInsecureHttp?: boolean;
     /** How long a dropped socket may stay away and still `resume` the call. Default 30 000 ms (the server's grace). */
     resumeGraceMs?: number;
     /** Interval for `quality` events and `stats` to the server. Default 10 000 ms. */
     statsIntervalMs?: number;
     /** Extra RTCConfiguration fields (iceServers come from the server). */
     rtcConfig?: Omit<RTCConfiguration, "iceServers">;
+    /**
+     * Relay-only ICE (`iceTransportPolicy: "relay"`) for every call: media goes
+     * through the TURN server only, so the other participants never learn this
+     * device's IP addresses (at the cost of relayed bandwidth and latency).
+     * Default false. Can be set per call with `JoinOptions.relayOnly`. Needs
+     * TURN on the server; without it a relay-only call cannot connect.
+     */
+    relayOnly?: boolean;
+    /**
+     * Split the outgoing video bitrate across the peers of a peer-to-peer call
+     * (clamp(available / peers, 150 kbps, 1.5 Mbps) per peer, lower resolution
+     * as it shrinks) and pause video under 150 kbps per peer to keep audio
+     * clear. Emits `video_reduced` / `video_paused` warnings. Audio is never
+     * touched. Default true.
+     */
+    adaptiveVideo?: boolean;
+    /** Interval of the network / CPU checks behind client-side warnings and adaptive video. Default 2 000 ms. */
+    healthIntervalMs?: number;
+    /**
+     * How `sendChat` / `sendData` deliver: `"auto"` (default) over WebRTC data
+     * channels to each peer, through the signaling server when a channel is
+     * not open; `"server"` always through the server.
+     */
+    messageTransport?: "auto" | "server";
     /** Override browser built-ins (tests). */
     platform?: Partial<CallPlatform>;
 }
-
-/** Default signaling endpoint. */
-declare const DEFAULT_CALL_URL = "wss://api.catzconnect.com/rtc/v1/ws";
-interface JoinOptions {
-    /** Send the microphone. Default true. */
-    audio?: boolean;
-    /** Send the camera. Default: true for a video call (when known from `incoming`), else false. */
-    video?: boolean;
-    /** Use this stream instead of asking for the camera/mic. The client does not stop its tracks on leave. */
-    stream?: MediaStream;
-}
-declare class CatzCallClient extends Emitter<CatzCallEvents> {
-    private readonly p;
-    private readonly opts;
-    private sig;
-    private iceServers;
-    private maxParticipants;
-    private call;
-    private links;
-    private ringing;
-    private localStream;
-    private ownsLocalStream;
-    private screenTrack;
-    private cameraTrack;
-    private muted;
-    private pendingJoin;
-    private statsTimer;
-    private downAt;
-    private resumeTimer;
-    private closedForGood;
-    private connecting;
-    private readonly onNetwork;
-    constructor(options?: CatzCallOptions);
-    /** True while the signaling socket is open. */
-    get connected(): boolean;
-    /** The call this client is in, or null. */
-    get callId(): string | null;
-    /** This participant's id in the current call (when the server sent it). */
-    get pid(): string | null;
-    /** The local camera/mic stream, once acquired. */
-    get localMediaStream(): MediaStream | null;
-    /** Remote participants in the current call. */
-    get peers(): PeerInfo[];
-    /** Remote stream for a participant. */
-    remoteStream(pid: string): MediaStream | null;
-    /** Opens signaling and waits for the server's `hello`. Safe to call more than once. */
-    connect(): Promise<void>;
-    private send;
-    /** ICE servers for the current call: the call's own (with TURN) or, before `joined`, hello's STUN. */
-    private callIce;
-    private applyIce;
-    private onOpen;
-    private onDown;
-    /** The grace ran out or the server refused the resume: join again with a new pid, keeping local media. */
-    private rejoin;
-    private networkChanged;
-    private onMessage;
-    private onJoined;
-    private settleJoin;
-    private failJoin;
-    private createLink;
-    private ensureLocalMedia;
-    private sendJoin;
-    private prepareJoin;
-    /**
-     * Joins a call: the caller after creating it on the backend, or anyone
-     * invited. Resolves with the call, this participant's pid and the peers
-     * already in it. For a provider-engine call it resolves with `provider`
-     * (and emits `provider`) instead of opening peer connections.
-     */
-    join(callId: string, options?: JoinOptions): Promise<JoinResult>;
-    /** Answers an `incoming` call (an alias of join for callees). */
-    accept(callId: string, options?: JoinOptions): Promise<JoinResult>;
-    /** Declines an `incoming` call. */
-    decline(callId: string): void;
-    /** The caller hangs up while it is still ringing. */
-    cancel(callId?: string): void;
-    /** Leaves the current call and releases the camera and microphone. */
-    leave(): void;
-    /** Mutes or unmutes the microphone (`audio`) or camera (`video`) without renegotiating. */
-    setMuted(kind: "audio" | "video", muted: boolean): void;
-    /** True when that kind is muted. */
-    isMuted(kind: "audio" | "video"): boolean;
-    /** Switches to the next camera (front/back on phones) with replaceTrack. */
-    switchCamera(): Promise<void>;
-    /** Shares the screen in place of the camera (replaceTrack; adds a video track in an audio call). */
-    shareScreen(): Promise<void>;
-    /** Stops sharing and puts the camera back (or sends no video if there was none). */
-    stopShare(): Promise<void>;
-    private startStats;
-    /** Samples every peer, emits `quality`, and sends one aggregated `stats` frame. Exposed for tests. */
-    collectStats(): Promise<void>;
-    private teardown;
-    private shutdown;
-    /** Leaves any call, closes signaling and stops all timers. The client cannot be reused. */
-    close(): void;
-}
-
-/** Counters kept between two samples so loss and bitrate are per interval. */
-interface StatsCursor {
-    at: number;
-    bytes: number;
-    packetsLost: number;
-    packetsReceived: number;
-}
-interface StatsSample {
-    connection: ConnectionType | null;
-    /** Candidate types of the selected pair, e.g. `host`/`srflx`/`relay`. */
-    localType: string | null;
-    remoteType: string | null;
-    rttMs: number | null;
-    jitterMs: number | null;
-    lossPct: number | null;
-    bitrateKbps: number | null;
-    cursor: StatsCursor;
-}
-/**
- * Reads an RTCStatsReport: the selected candidate pair decides the path
- * (`relay` when either side's candidate is a TURN relay, otherwise
- * `direct`), with its round-trip time; inbound RTP gives jitter and loss;
- * transport/pair bytes give the bitrate since `prev`.
- */
-declare function readStats(report: RTCStatsReport | Map<string, any>, now: number, prev?: StatsCursor): StatsSample;
-/** good (< 300 ms rtt and < 3 % loss), poor (> 600 ms or > 10 %), otherwise fair. */
-declare function qualityLevel(rttMs: number | null, lossPct: number | null): "good" | "fair" | "poor" | "unknown";
-
-/** The `exp` (unix seconds) inside a `ct1.<payload>.<mac>` user token, or null. */
-declare function tokenExpiry(token: string): number | null;
-/** Full-jitter exponential backoff: a delay in [d/2, d] where d = min(max, base·2^attempt). */
-declare function backoffDelay(attempt: number, random: () => number, base?: number, max?: number): number;
-
-export { type CallErrorEvent, type CallInfo, type CallMode, type CallPlatform, type CallStatus, CatzCallClient, type CatzCallEvents, type CatzCallOptions, type ClientMessage, type ConnectionType, DEFAULT_CALL_URL, type IceServerInfo, type IncomingCall, type JoinOptions, type JoinResult, type PeerInfo, type PeerQuality, type ProviderInfo, type ServerMessage, type SignalData, type StatsSample, backoffDelay, qualityLevel, readStats, tokenExpiry };

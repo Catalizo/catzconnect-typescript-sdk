@@ -1,8 +1,38 @@
+import { checkBaseUrl } from "../core/http";
 import { Emitter } from "./emitter";
 import { getLocalMedia, getScreenTrack, nextCamera } from "./media";
+import {
+  CallMessageError,
+  checkChat,
+  checkData,
+  chooseRoute,
+  DEFAULT_MESSAGE_LIMITS,
+  decodeEnvelope,
+  Dedup,
+  encodeEnvelope,
+  messageLimitsFrom,
+  newMessageId,
+  RateBucket,
+  validMessageId,
+  isUnsupportedMessageError,
+} from "./messages";
+import type { MessageLimits } from "./messages";
 import { PeerLink } from "./peer";
 import { isAuthErrorCode, Signaling } from "./signaling";
 import { qualityLevel } from "./stats";
+import {
+  CallWarningCodes,
+  defaultWarningMessage,
+  networkBad,
+  parseWarning,
+  parseWarningCleared,
+  requiredKbps,
+  SustainedFlag,
+  VideoAdapter,
+  videoTarget,
+  warningSeverity,
+} from "./warnings";
+import type { CallWarning, CallWarningCode, CallWarningSource } from "./warnings";
 import type {
   CallInfo,
   CallMode,
@@ -17,6 +47,9 @@ import type {
   JoinResult,
   PeerInfo,
   ProviderInfo,
+  SendDataOptions,
+  SendMessageOptions,
+  SentMessage,
   ServerMessage,
 } from "./types";
 
@@ -26,6 +59,8 @@ export const DEFAULT_CALL_URL = "wss://api.catzconnect.com/rtc/v1/ws";
 const TERMINAL: ReadonlySet<CallStatus> = new Set(["ended", "missed", "declined", "canceled", "failed"]);
 const JOIN_TIMEOUT_MS = 15_000;
 const RESUME_CONFIRM_MS = 5_000;
+/** Bandwidth estimates of a new connection are ignored for this long while they ramp up. */
+const ESTIMATE_WARMUP_MS = 10_000;
 
 export interface JoinOptions {
   /** Send the microphone. Default true. */
@@ -34,6 +69,12 @@ export interface JoinOptions {
   video?: boolean;
   /** Use this stream instead of asking for the camera/mic. The client does not stop its tracks on leave. */
   stream?: MediaStream;
+  /**
+   * Relay-only ICE for this call (overrides the client's `relayOnly`):
+   * media goes through the TURN server only, so the other participants
+   * never learn this device's IP addresses. Needs TURN on the server.
+   */
+  relayOnly?: boolean;
 }
 
 interface ActiveCall {
@@ -117,12 +158,32 @@ export function staleLink(link: { epoch?: number }, epoch: number | undefined): 
   return typeof epoch === "number" && typeof link.epoch === "number" && link.epoch !== epoch;
 }
 
+/**
+ * The RTCConfiguration for a peer connection: `relayOnly` (the join's, else
+ * the client's) forces `iceTransportPolicy: "relay"`, over anything in
+ * `rtcConfig`; otherwise `rtcConfig.iceTransportPolicy` or `"all"`.
+ */
+export function rtcConfigFor(
+  opts: Pick<CatzCallOptions, "rtcConfig" | "relayOnly">,
+  joinRelayOnly: boolean | undefined,
+  iceServers: RTCIceServer[],
+): RTCConfiguration {
+  const relay = joinRelayOnly ?? opts.relayOnly ?? false;
+  return {
+    iceTransportPolicy: "all",
+    bundlePolicy: "max-bundle",
+    rtcpMuxPolicy: "require",
+    ...opts.rtcConfig,
+    ...(relay ? { iceTransportPolicy: "relay" as RTCIceTransportPolicy } : {}),
+    iceServers,
+  };
+}
+
 export class CatzCallClient extends Emitter<CatzCallEvents> {
   private readonly p: CallPlatform;
   private readonly opts: CatzCallOptions;
   private sig: Signaling | null = null;
   private iceServers: IceServerInfo[] = [];
-  private maxParticipants = 4;
   private call: ActiveCall | null = null;
   private links = new Map<string, PeerLink>();
   private ringing = new Map<string, CallInfo>();
@@ -137,10 +198,28 @@ export class CatzCallClient extends Emitter<CatzCallEvents> {
   private resumeTimer: ReturnType<typeof setTimeout> | null = null;
   private closedForGood = false;
   private connecting: Promise<void> | null = null;
+  /** `JoinOptions.relayOnly` of the last join/accept (kept for rejoins). */
+  private joinRelayOnly: boolean | undefined = undefined;
   private readonly onNetwork = () => this.networkChanged();
+  /** Active warnings of the current call, by code. */
+  private warnings = new Map<string, CallWarning>();
+  private healthTimer: ReturnType<typeof setInterval> | null = null;
+  private healthBusy = false;
+  private readonly netFlag = new SustainedFlag(6_000, 6_000);
+  private readonly cpuFlag = new SustainedFlag(6_000, 6_000);
+  private readonly adapter = new VideoAdapter();
+  /** In-call message caps (from `hello.limits`). */
+  private msgLimits: MessageLimits = { ...DEFAULT_MESSAGE_LIMITS };
+  private sendBucket = new RateBucket(DEFAULT_MESSAGE_LIMITS);
+  /** Per-peer rate limit on what arrives over data channels (the server limits the relay path). */
+  private recvBuckets = new Map<string, RateBucket>();
+  /** (sender pid, message id) already delivered: a message that came both ways is emitted once. */
+  private readonly seen = new Dedup(2048);
 
   constructor(options: CatzCallOptions = {}) {
     super();
+    // A ws:// signaling URL would carry the call token in clear text.
+    if (options.url !== undefined) checkBaseUrl(options.url, !!options.allowInsecureHttp, "CatzCallClient url");
     this.opts = options;
     this.p = resolvePlatform(options.platform);
   }
@@ -170,6 +249,11 @@ export class CatzCallClient extends Emitter<CatzCallEvents> {
   /** Remote participants in the current call. */
   get peers(): PeerInfo[] {
     return [...this.links.entries()].map(([pid, l]) => ({ pid, user_id: l.userId }));
+  }
+
+  /** Warnings in effect for the current call (server and client), oldest first. */
+  get activeWarnings(): CallWarning[] {
+    return [...this.warnings.values()];
   }
 
   /** Remote stream for a participant. */
@@ -230,8 +314,13 @@ export class CatzCallClient extends Emitter<CatzCallEvents> {
   private onOpen(hello: HelloMessage, reconnect: boolean): void {
     // hello carries STUN only; a call's TURN credentials stay until `joined`/`ice_refresh` renews them.
     this.iceServers = Array.isArray(hello.ice_servers) ? hello.ice_servers : [];
-    if (hello.limits?.max_participants) this.maxParticipants = hello.limits.max_participants;
     if (!this.call?.ice) this.applyIce();
+    const limits = messageLimitsFrom(hello.limits as Record<string, unknown> | undefined);
+    if (JSON.stringify(limits) !== JSON.stringify(this.msgLimits)) {
+      this.msgLimits = limits;
+      this.sendBucket = new RateBucket(limits);
+      this.recvBuckets.clear();
+    }
 
     if (!reconnect) return;
     const downFor = this.downAt === null ? 0 : this.p.now() - this.downAt;
@@ -328,6 +417,7 @@ export class CatzCallClient extends Emitter<CatzCallEvents> {
           l.close();
           this.links.delete(m.pid);
         }
+        this.recvBuckets.delete(m.pid);
         this.emit("peer-left", { callId: m.call_id, pid: m.pid, userId: m.user_id, reason: m.reason });
         return;
       }
@@ -362,10 +452,36 @@ export class CatzCallClient extends Emitter<CatzCallEvents> {
         this.applyIce();
         return;
       }
+      case "warning": {
+        const w = parseWarning(m, this.p.now(), this.call?.id ?? this.pendingJoin?.callId);
+        if (w && this.isOurCall(w.callId)) this.raiseWarning(w);
+        return;
+      }
+      case "warning_cleared": {
+        const c = parseWarningCleared(m, this.p.now(), this.call?.id ?? this.pendingJoin?.callId);
+        if (c && this.isOurCall(c.callId)) this.clearWarning(c.code, "server");
+        return;
+      }
       case "pong":
+        return;
+      case "chat":
+      case "data":
+        this.onRelayedMessage(m);
         return;
       case "error": {
         const callId = m.call_id ?? undefined;
+        if (validMessageId(m.id)) {
+          // A chat / data message was refused: nothing to do with joins or resumes.
+          this.emit("error", { code: m.code, message: m.message, callId, messageId: m.id });
+          return;
+        }
+        if (isUnsupportedMessageError(m.code, m.message)) {
+          // A server without in-call messages refused a chat / data frame
+          // (it has no `id`): not a join or resume failure. Stop relaying.
+          this.msgLimits = { ...this.msgLimits, relay: false };
+          this.emit("error", { code: m.code, message: m.message, callId });
+          return;
+        }
         if (this.pendingJoin && !this.pendingJoin.silent && (!callId || callId === this.pendingJoin.callId)) {
           this.failJoin(Object.assign(new Error(m.message || m.code), { code: m.code }));
         } else if (this.resumeTimer && this.call && (!callId || callId === this.call.id) && !isAuthErrorCode(m.code)) {
@@ -433,8 +549,8 @@ export class CatzCallClient extends Emitter<CatzCallEvents> {
           this.links.delete(pid);
         }
       }
-      const limit = Math.max(1, (call.max_participants ?? this.maxParticipants) - 1);
-      peers.slice(0, limit).forEach((peer) => {
+      // No participant cap here: the server decides who may join.
+      peers.forEach((peer) => {
         const l = this.links.get(peer.pid);
         if (l && staleLink(l, peer.epoch)) {
           // The peer rejoined from another device while we were away.
@@ -446,13 +562,6 @@ export class CatzCallClient extends Emitter<CatzCallEvents> {
           if (typeof peer.epoch === "number") l.epoch = peer.epoch;
         } else this.createLink(peer, true);
       });
-      if (peers.length > limit) {
-        this.emit("error", {
-          code: "too_many_participants",
-          message: `Only ${limit + 1} participants fit a peer-to-peer call`,
-          callId: call.id,
-        });
-      }
       this.startStats();
       this.settleJoin(pending, { call, pid: this.call.pid, peers });
     };
@@ -475,6 +584,7 @@ export class CatzCallClient extends Emitter<CatzCallEvents> {
     this.pendingJoin = null;
     this.p.clearTimeout(pj.timer);
     if (this.call && this.call.id === pj.callId && this.links.size === 0) this.teardown();
+    else if (!this.call) this.clearAllWarnings();
     pj.reject(err);
   }
 
@@ -496,13 +606,7 @@ export class CatzCallClient extends Emitter<CatzCallEvents> {
       initiator,
       mode: call.mode,
       platform: this.p,
-      config: {
-        iceTransportPolicy: "all",
-        bundlePolicy: "max-bundle",
-        rtcpMuxPolicy: "require",
-        ...this.opts.rtcConfig,
-        iceServers: toRtcIce(this.callIce()),
-      },
+      config: rtcConfigFor(this.opts, this.joinRelayOnly, toRtcIce(this.callIce())),
       local: () => this.localStream,
       send: (data) => this.send({ t: "signal", call_id: callId, to: pid, data }),
       onTrack: (stream, track) => this.emit("track", { callId, pid, userId: link.userId, stream, track }),
@@ -510,6 +614,7 @@ export class CatzCallClient extends Emitter<CatzCallEvents> {
       onReconnecting: (attempt) => this.emit("reconnecting", { scope: "peer", callId, pid, attempt }),
       onReconnected: () => this.emit("reconnected", { scope: "peer", callId, pid }),
       onError: (code, message, cause) => this.emit("error", { code, message, callId, pid, cause }),
+      onChannelMessage: (raw) => this.onPeerMessage(callId, pid, link, raw),
     });
     if (typeof peer.epoch === "number") link.epoch = peer.epoch;
     this.links.set(pid, link);
@@ -559,6 +664,7 @@ export class CatzCallClient extends Emitter<CatzCallEvents> {
     if (typeof callId !== "string" || callId.trim() === "") throw new Error("Missing call id");
     if (this.call && this.call.id !== callId) throw new Error("Already in a call; leave() first");
     await this.connect();
+    this.joinRelayOnly = o.relayOnly;
     const known = this.ringing.get(callId);
     const media = { audio: o.audio ?? true, video: o.video ?? known?.mode === "video" };
     if (o.stream) {
@@ -666,11 +772,238 @@ export class CatzCallClient extends Emitter<CatzCallEvents> {
     if (this.localStream) this.emit("local-stream", { stream: this.localStream, screen: false });
   }
 
+  // ── in-call messages ─────────────────────────────────────────────────
+
+  /** The in-call message caps in force (from the server's `hello`). */
+  get messageLimits(): MessageLimits {
+    return { ...this.msgLimits };
+  }
+
+  /**
+   * Sends a chat message to everyone in the call, or to one participant
+   * (`to`: its pid). Goes over WebRTC data channels when they are open,
+   * through the signaling server otherwise. Your own message is not echoed
+   * back as a `chat` event — show it from the returned `SentMessage`.
+   * Throws `CallMessageError` (`not_in_call`, `bad_request`,
+   * `message_too_large`, `rate_limited`, `no_route`); a refusal by the
+   * server arrives as an `error` event with `messageId`.
+   */
+  sendChat(text: string, options: SendMessageOptions = {}): SentMessage {
+    const err = checkChat(text, this.msgLimits);
+    if (err) throw err;
+    return this.sendMessage("chat", text, undefined, options.to, true);
+  }
+
+  /**
+   * Sends app-defined data (any JSON value, at most `messageLimits.dataMaxBytes`
+   * as JSON) to everyone or to one participant. `reliable: false` uses the
+   * unordered, no-retransmit channel. Same delivery and errors as `sendChat`.
+   */
+  sendData(payload: unknown, options: SendDataOptions = {}): SentMessage {
+    const { error } = checkData(payload, this.msgLimits);
+    if (error) throw error;
+    return this.sendMessage("data", undefined, payload, options.to, options.reliable !== false);
+  }
+
+  private sendMessage(kind: "chat" | "data", text: string | undefined, payload: unknown, to: string | undefined, reliable: boolean): SentMessage {
+    const call = this.call;
+    if (!call) throw new CallMessageError("not_in_call", "Not in a call");
+    if (to !== undefined && (typeof to !== "string" || to === "" || to === call.pid)) {
+      throw new CallMessageError("bad_request", "`to` must be another participant's pid");
+    }
+    const now = this.p.now();
+    if (!this.sendBucket.take(now)) throw new CallMessageError("rate_limited", "Too many messages — slow down");
+    const id = newMessageId(this.p.random, now);
+    const target = to !== undefined ? this.links.get(to) : undefined;
+    const links = to !== undefined ? (target ? [target] : []) : [...this.links.values()];
+    const route = chooseRoute(
+      links.map((l) => ({ open: l.channelOpen(reliable) })),
+      { forceServer: this.opts.messageTransport === "server" || !!call.provider, serverRelay: this.msgLimits.relay },
+    );
+    const sent: SentMessage = { id, ts: now, via: "p2p", to: to ?? null };
+    if (route === "p2p") {
+      const env = encodeEnvelope(
+        kind === "chat"
+          ? { v: 1, k: "chat", id, ts: now, to: to ?? null, text }
+          : { v: 1, k: "data", id, ts: now, to: to ?? null, payload, reliable },
+      );
+      const missed = links.filter((l) => !l.sendOnChannel(env, reliable));
+      if (missed.length === 0) return sent;
+      if (!this.msgLimits.relay) {
+        if (missed.length === links.length) throw new CallMessageError("no_route", "No open data channel and the server does not relay messages");
+        return sent; // delivered where a channel was open
+      }
+      // Some channel failed: the server delivers too (receivers drop the repeat).
+    } else if (route === "none") {
+      throw new CallMessageError("no_route", "No open data channel and the server does not relay messages");
+    }
+    const msg =
+      kind === "chat"
+        ? { t: "chat" as const, call_id: call.id, id, text: text as string, ...(to !== undefined ? { to } : {}) }
+        : { t: "data" as const, call_id: call.id, id, payload, ...(to !== undefined ? { to } : {}) };
+    // Unreliable data is not worth sending late.
+    this.send(msg, reliable);
+    return { ...sent, via: "relay" };
+  }
+
+  private onRelayedMessage(m: Extract<ServerMessage, { t: "chat" | "data" }>): void {
+    const call = this.call;
+    if (!call || m.call_id !== call.id || !validMessageId(m.id) || typeof m.from !== "string" || m.from === "") return;
+    if (m.t === "chat" && typeof m.text !== "string") return;
+    if (this.seen.seen(`${m.from}|${m.id}`)) return;
+    const to = typeof m.to === "string" ? m.to : null;
+    const base = {
+      callId: call.id,
+      id: m.id,
+      from: m.from,
+      userId: typeof m.user_id === "string" ? m.user_id : (this.links.get(m.from)?.userId ?? ""),
+      to,
+      private: to !== null,
+      ts: typeof m.ts === "number" ? m.ts : this.p.now(),
+      via: "relay" as const,
+    };
+    if (m.t === "chat") this.emit("chat", { ...base, text: m.text });
+    else this.emit("data", { ...base, payload: m.payload });
+  }
+
+  private onPeerMessage(callId: string, pid: string, link: PeerLink, raw: string): void {
+    const call = this.call;
+    if (!call || call.id !== callId || this.links.get(pid) !== link) return;
+    const e = decodeEnvelope(raw, this.msgLimits);
+    if (!e) return;
+    if (e.to !== null && call.pid && e.to !== call.pid) return; // not for us
+    let bucket = this.recvBuckets.get(pid);
+    if (!bucket) this.recvBuckets.set(pid, (bucket = new RateBucket(this.msgLimits)));
+    if (!bucket.take(this.p.now())) return; // a flooding peer
+    if (this.seen.seen(`${pid}|${e.id}`)) return;
+    const base = { callId, id: e.id, from: pid, userId: link.userId, to: e.to, private: e.to !== null, ts: e.ts, via: "p2p" as const };
+    if (e.k === "chat") this.emit("chat", { ...base, text: e.text as string });
+    else this.emit("data", { ...base, payload: e.payload });
+  }
+
   // ── stats ────────────────────────────────────────────────────────────
 
   private startStats(): void {
+    if (!this.healthTimer) {
+      this.healthTimer = this.p.setInterval(() => void this.checkHealth(), this.opts.healthIntervalMs ?? 2_000);
+    }
     if (this.statsTimer) return;
     this.statsTimer = this.p.setInterval(() => void this.collectStats(), this.opts.statsIntervalMs ?? 10_000);
+  }
+
+  // ── warnings ─────────────────────────────────────────────────────────
+
+  private isOurCall(callId: string): boolean {
+    return callId === this.call?.id || callId === this.pendingJoin?.callId;
+  }
+
+  /** Adds or updates an active warning; emits `warning` when it is new (or its participant count changed). */
+  private raiseWarning(w: CallWarning): void {
+    const prev = this.warnings.get(w.code);
+    if (prev && prev.participants === w.participants && prev.message === w.message) return;
+    this.warnings.set(w.code, prev ? { ...w, at: prev.at } : w);
+    this.emit("warning", w);
+  }
+
+  private clientWarning(code: CallWarningCode): void {
+    const callId = this.call?.id;
+    if (!callId) return;
+    this.raiseWarning({
+      code,
+      message: defaultWarningMessage(code),
+      callId,
+      participants: this.links.size + 1,
+      source: "client",
+      severity: warningSeverity(code),
+      at: this.p.now(),
+    });
+  }
+
+  private clearWarning(code: CallWarningCode, source: CallWarningSource): void {
+    const w = this.warnings.get(code);
+    if (!w) return;
+    this.warnings.delete(code);
+    this.emit("warning-cleared", { code, callId: w.callId, source, at: this.p.now() });
+  }
+
+  private clearAllWarnings(): void {
+    for (const w of [...this.warnings.values()]) this.clearWarning(w.code, w.source);
+  }
+
+  /** True when some peer gets (or will get) video from this client. */
+  private sendingVideo(): boolean {
+    for (const l of this.links.values()) {
+      if (l.pc.getSenders().some((x) => x.track?.kind === "video")) return true;
+    }
+    return false;
+  }
+
+  /**
+   * The ~2 s check behind client-side warnings and adaptive video: samples
+   * every peer, raises/clears `poor_network` and `device_overloaded` (with
+   * hysteresis), and shapes the outgoing video. Exposed for tests.
+   */
+  async checkHealth(): Promise<void> {
+    const call = this.call;
+    if (!call || call.provider || this.healthBusy) return;
+    this.healthBusy = true;
+    try {
+      const links = [...this.links.values()];
+      const rows = await Promise.all(links.map(async (l) => ({ l, s: await l.sample("health") })));
+      if (this.call !== call) return;
+      const now = this.p.now();
+      const usable = rows.filter((r) => r.s && r.s.connection);
+      if (usable.length === 0) return;
+      const avg = (xs: Array<number | null>) => {
+        const v = xs.filter((x): x is number => typeof x === "number");
+        return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
+      };
+      // Averages over the peers: a weak uplink shows on every connection, one bad peer does not.
+      const lossPct = avg(
+        usable.map((r) => {
+          const a = r.s!.lossPct;
+          const b = r.s!.remoteLossPct;
+          return a === null ? b : b === null ? a : Math.max(a, b);
+        }),
+      );
+      const rttMs = avg(usable.map((r) => r.s!.rttMs));
+      const warm = usable.filter(
+        (r) => r.s!.availableOutgoingKbps !== null && r.l.firstPathAt !== null && now - r.l.firstPathAt >= ESTIMATE_WARMUP_MS,
+      );
+      const peers = links.length;
+      const meanAvail = avg(warm.map((r) => r.s!.availableOutgoingKbps));
+      const availableKbps = meanAvail === null ? null : meanAvail * peers;
+      const video = this.sendingVideo();
+      const adaptive = this.opts.adaptiveVideo !== false;
+
+      const net = this.netFlag.update(
+        networkBad(
+          { availableKbps, neededKbps: requiredKbps(peers, video && !(adaptive && this.adapter.paused)), lossPct, rttMs },
+          this.netFlag.active,
+        ),
+        now,
+      );
+      if (net === "enter") this.clientWarning(CallWarningCodes.PoorNetwork);
+      else if (net === "exit") this.clearWarning(CallWarningCodes.PoorNetwork, "client");
+
+      const cpu = this.cpuFlag.update(usable.some((r) => r.s!.cpuLimited), now);
+      if (cpu === "enter") this.clientWarning(CallWarningCodes.DeviceOverloaded);
+      else if (cpu === "exit") this.clearWarning(CallWarningCodes.DeviceOverloaded, "client");
+
+      if (!adaptive || !video) return;
+      const changes = this.adapter.update({ now, peers, availableKbps, lossPct, rttMs });
+      const target = videoTarget(this.adapter.level, peers);
+      await Promise.all(links.map((l) => l.applyVideo(target)));
+      if (this.call !== call) return;
+      for (const c of changes) {
+        if (c === "reduced") this.clientWarning(CallWarningCodes.VideoReduced);
+        else if (c === "restored") this.clearWarning(CallWarningCodes.VideoReduced, "client");
+        else if (c === "paused") this.clientWarning(CallWarningCodes.VideoPaused);
+        else if (c === "resumed") this.clearWarning(CallWarningCodes.VideoPaused, "client");
+      }
+    } finally {
+      this.healthBusy = false;
+    }
   }
 
   /** Samples every peer, emits `quality`, and sends one aggregated `stats` frame. Exposed for tests. */
@@ -721,10 +1054,18 @@ export class CatzCallClient extends Emitter<CatzCallEvents> {
   private teardown(): void {
     if (this.statsTimer) this.p.clearInterval(this.statsTimer);
     this.statsTimer = null;
+    if (this.healthTimer) this.p.clearInterval(this.healthTimer);
+    this.healthTimer = null;
+    this.netFlag.reset();
+    this.cpuFlag.reset();
+    this.adapter.reset();
+    this.clearAllWarnings();
     if (this.resumeTimer) this.p.clearTimeout(this.resumeTimer);
     this.resumeTimer = null;
     for (const l of this.links.values()) l.close();
     this.links.clear();
+    this.recvBuckets.clear();
+    this.seen.clear();
     if (this.screenTrack) this.screenTrack.stop();
     this.screenTrack = null;
     if (this.ownsLocalStream) {

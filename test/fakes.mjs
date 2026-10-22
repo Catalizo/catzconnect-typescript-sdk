@@ -155,9 +155,17 @@ export class FakePC {
   _sender(track) {
     const sender = {
       track,
+      params: { transactionId: "x", encodings: [{ active: true }] },
+      setParametersCalls: 0,
       replaceTrack: async (t) => {
         sender.track = t;
         this.log.push(`replaceTrack:${t ? t.kind + ":" + t.deviceId : "null"}`);
+      },
+      getParameters: () => JSON.parse(JSON.stringify(sender.params)),
+      setParameters: async (p) => {
+        sender.params = JSON.parse(JSON.stringify(p));
+        sender.setParametersCalls++;
+        this.log.push(`setParameters:${sender.track?.kind}`);
       },
     };
     return sender;
@@ -233,6 +241,19 @@ export class FakePC {
   async createOffer() {
     return { type: "offer", sdp: "legacy" };
   }
+  createDataChannel(label, init) {
+    const ch = new FakeDataChannel(label, init);
+    (this.channels ??= []).push(ch);
+    this._needNegotiation();
+    return ch;
+  }
+  /** Test helper: the remote side opened a data channel. */
+  remoteChannel(label) {
+    const ch = new FakeDataChannel(label, {});
+    (this.channels ??= []).push(ch);
+    this.ondatachannel?.({ channel: ch });
+    return ch;
+  }
   async getStats() {
     return this.stats;
   }
@@ -251,6 +272,34 @@ export class FakePC {
     const track = new FakeTrack(kind);
     this.ontrack?.({ track, streams: [] });
     return track;
+  }
+}
+
+export class FakeDataChannel {
+  constructor(label, init) {
+    this.label = label;
+    this.init = init;
+    this.readyState = "connecting";
+    this.bufferedAmount = 0;
+    this.sent = [];
+    this.closed = false;
+  }
+  send(data) {
+    if (this.readyState !== "open") throw new Error("InvalidStateError: channel not open");
+    if (this.failSend) throw new Error("send failed");
+    this.sent.push(data);
+  }
+  close() {
+    this.closed = true;
+    this.readyState = "closed";
+  }
+  // test helpers
+  open() {
+    this.readyState = "open";
+    this.onopen?.();
+  }
+  receive(data) {
+    this.onmessage?.({ data });
   }
 }
 
